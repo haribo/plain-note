@@ -91,7 +91,11 @@ enum Command {
         cmd: RemoteCmd,
     },
     /// Sync with the relay (push local, pull remote)
-    Sync,
+    Sync {
+        /// Keep running: re-sync on local edits and periodically pull
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -233,9 +237,13 @@ async fn main() -> Result<()> {
         }
         Command::Folder { cmd } => run_folder(cmd, &store, now)?,
         Command::Remote { cmd } => run_remote(cmd).await?,
-        Command::Sync => {
-            let seq = remote::sync(&config::config_path(), &store).await?;
-            println!("synced (seq {seq})");
+        Command::Sync { watch } => {
+            if watch {
+                remote::watch(&config::config_path(), &store).await?;
+            } else {
+                let seq = remote::sync(&config::config_path(), &store).await?;
+                println!("synced (seq {seq})");
+            }
         }
     }
     Ok(())

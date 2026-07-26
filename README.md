@@ -100,6 +100,16 @@ pn remote pair <blob>
 pn sync
 ```
 
+For continuous background sync, run the daemon (re-syncs on local edits and
+polls for remote changes):
+
+```sh
+pn sync --watch
+```
+
+Enable it as a per-user service with the unit in
+[`packaging/systemd/`](packaging/systemd/plain-note-sync.service).
+
 Sync config lives at `$XDG_CONFIG_HOME/plain-note/config.json` (override with
 `$PN_CONFIG`); it holds this device's credentials and the E2E key.
 
