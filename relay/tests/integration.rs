@@ -380,3 +380,99 @@ async fn device_count(app: &axum::Router, group: &str) -> usize {
     let list: DeviceListResponse = serde_json::from_slice(&body).unwrap();
     list.devices.len()
 }
+
+#[tokio::test]
+async fn attachment_upload_download_and_isolation() {
+    use sha2::{Digest, Sha256};
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let (_g1, code1) = storage.create_group();
+    let (dev1, _) = storage.enroll(&code1, vec![1]).unwrap();
+    let token1 = storage.issue_token(&dev1);
+    // A second, separate group + device.
+    let (_g2, code2) = storage.create_group();
+    let (dev2, _) = storage.enroll(&code2, vec![2]).unwrap();
+    let token2 = storage.issue_token(&dev2);
+
+    let app = build_app(AppState::new(storage, None));
+
+    let blob = b"encrypted-attachment-bytes".to_vec();
+    let id = hex::encode(Sha256::digest(&blob));
+
+    // Upload with a valid token.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/attachments/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token1}"))
+                .body(Body::from(blob.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Download round-trips the exact bytes.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/attachments/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token1}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(got.to_vec(), blob);
+
+    // Missing/invalid token is rejected.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/attachments/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // A device in another group cannot see it.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/attachments/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token2}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Id that does not match the body hash is rejected.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/attachments/deadbeef")
+                .header(header::AUTHORIZATION, format!("Bearer {token1}"))
+                .body(Body::from(blob))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
