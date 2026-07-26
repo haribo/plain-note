@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# Validate the commit message against docs/git-commits.md.
+# Self-contained (no commitlint/npm dependency) — mirrors the conventional-commit
+# rules: type set, optional scope, optional '!', lowercase subject, no trailing
+# period, header <= 72 chars (excluding an auto-appended "(#N)" suffix).
+
+set -euo pipefail
+
+msg_file="$1"
+# First non-comment, non-empty line = the header.
+header=$(grep -v '^#' "$msg_file" | sed '/^[[:space:]]*$/d' | head -n1)
+
+# Allow merge/revert commits through untouched.
+case "$header" in
+  "Merge "*|"Revert "*) exit 0 ;;
+esac
+
+# Strip a trailing " (#123)" so squash-merge suffixes don't blow the length gate.
+core=${header% (#[0-9]*)}
+
+types='feat|fix|docs|style|refactor|perf|test|chore|ci|build'
+pattern="^(${types})(\([a-z0-9-]+\))?!?: [a-z].*$"
+
+fail() {
+  echo ""
+  echo "ERROR: invalid commit message:"
+  echo "  $header"
+  echo ""
+  echo "  Expected: <type>(<scope>): <description>   (see docs/git-commits.md)"
+  echo "  Types: feat fix docs style refactor perf test chore ci build"
+  echo "  Rules: lowercase subject, imperative, no trailing period, <= 72 chars"
+  echo ""
+  exit 1
+}
+
+echo "$core" | grep -qE "$pattern" || fail
+[ "${#core}" -le 72 ] || { echo "ERROR: header exceeds 72 characters"; fail; }
+case "$core" in *.) echo "ERROR: subject ends with a period"; fail ;; esac
+
+exit 0

@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# --- Block HACK comments in staged Rust/Kotlin sources ---
+
+HACK_PATTERN="// HACK:"
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(rs|kt|kts)$' || true)
+
+if [ -n "$STAGED_FILES" ]; then
+  FOUND_HACKS=""
+  for FILE in $STAGED_FILES; do
+    if git show ":$FILE" | grep -q "$HACK_PATTERN"; then
+      FOUND_HACKS="$FOUND_HACKS\n  - $FILE"
+    fi
+  done
+
+  if [ -n "$FOUND_HACKS" ]; then
+    echo ""
+    echo "ERROR: Found HACK comments in staged files:"
+    echo -e "$FOUND_HACKS"
+    echo ""
+    echo "Remove the HACK code before committing, or use --no-verify to bypass."
+    echo ""
+    exit 1
+  fi
+fi
+
+# --- Security: scan staged files for secrets with gitleaks ---
+# Skipped silently when gitleaks is not installed locally — CI is the backstop.
+# Install: https://github.com/gitleaks/gitleaks
+
+if command -v gitleaks > /dev/null 2>&1; then
+  if ! gitleaks detect --staged --no-banner --redact; then
+    echo ""
+    echo "ERROR: gitleaks detected potential secrets in staged files."
+    echo "Review the findings above before committing."
+    echo ""
+    exit 1
+  fi
+fi
+
+exit 0
