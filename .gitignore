@@ -1,0 +1,10 @@
+# Rust
+/target
+**/*.rs.bk
+# Cargo.lock is committed: this workspace ships binaries (cli, relay).
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
