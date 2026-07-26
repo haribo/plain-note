@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -50,6 +51,16 @@ pub trait Storage: Send + Sync {
     fn enroll(&self, invite_code: &str, pubkey: Vec<u8>) -> Result<(String, String), StorageError>;
     /// Look up a device by id (for auth).
     fn device(&self, device_id: &str) -> Option<Device>;
+    /// Issue a fresh bearer token for a device (HTTP attachment auth) and return
+    /// it. Only the token's hash is stored.
+    fn issue_token(&self, device_id: &str) -> String;
+    /// Resolve a bearer token to its (non-revoked) device.
+    fn device_by_token(&self, token: &str) -> Option<Device>;
+    /// Store an encrypted attachment blob. Idempotent per `(group, id)`; returns
+    /// whether it was newly stored.
+    fn put_attachment(&self, group_id: &str, attachment_id: &str, blob: Vec<u8>) -> bool;
+    /// Fetch an encrypted attachment blob.
+    fn get_attachment(&self, group_id: &str, attachment_id: &str) -> Option<Vec<u8>>;
     /// Every device registered in a group.
     fn list_devices(&self, group_id: &str) -> Vec<Device>;
     /// Remove a device so it can no longer authenticate. Returns whether it
@@ -77,13 +88,19 @@ fn random_hex(bytes: usize) -> String {
     hex::encode(buf)
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
 #[derive(Default)]
 struct Inner {
     groups: HashSet<String>,
     invites: HashMap<String, String>, // code -> group_id (present == unused)
     devices: HashMap<String, Device>,
+    tokens: HashMap<String, String>, // token_hash -> device_id
     logs: HashMap<String, Vec<StoredChange>>,
     seen: HashMap<String, HashMap<String, u64>>, // group_id -> (change_id -> seq)
+    attachments: HashMap<(String, String), Vec<u8>>, // (group_id, attachment_id) -> blob
 }
 
 #[derive(Default)]
@@ -152,12 +169,43 @@ impl Storage for InMemoryStorage {
     }
 
     fn revoke_device(&self, device_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.tokens.retain(|_, dev| dev != device_id);
+        inner.devices.remove(device_id).is_some()
+    }
+
+    fn issue_token(&self, device_id: &str) -> String {
+        let token = random_hex(32);
         self.inner
             .lock()
             .unwrap()
-            .devices
-            .remove(device_id)
-            .is_some()
+            .tokens
+            .insert(sha256_hex(token.as_bytes()), device_id.to_string());
+        token
+    }
+
+    fn device_by_token(&self, token: &str) -> Option<Device> {
+        let inner = self.inner.lock().unwrap();
+        let device_id = inner.tokens.get(&sha256_hex(token.as_bytes()))?;
+        inner.devices.get(device_id).cloned()
+    }
+
+    fn put_attachment(&self, group_id: &str, attachment_id: &str, blob: Vec<u8>) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .attachments
+            .insert((group_id.to_string(), attachment_id.to_string()), blob)
+            .is_none()
+    }
+
+    fn get_attachment(&self, group_id: &str, attachment_id: &str) -> Option<Vec<u8>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .attachments
+            .get(&(group_id.to_string(), attachment_id.to_string()))
+            .cloned()
     }
 
     fn append_change(
@@ -229,6 +277,16 @@ impl SqliteStorage {
                  id TEXT PRIMARY KEY,
                  group_id TEXT NOT NULL,
                  pubkey BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS tokens (
+                 token_hash TEXT PRIMARY KEY,
+                 device_id TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS attachments (
+                 group_id TEXT NOT NULL,
+                 attachment_id TEXT NOT NULL,
+                 blob BLOB NOT NULL,
+                 PRIMARY KEY (group_id, attachment_id)
              );
              CREATE TABLE IF NOT EXISTS changes (
                  group_id TEXT NOT NULL,
@@ -342,9 +400,74 @@ impl Storage for SqliteStorage {
 
     fn revoke_device(&self, device_id: &str) -> bool {
         let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM tokens WHERE device_id = ?1",
+            params![device_id],
+        )
+        .expect("delete tokens");
         conn.execute("DELETE FROM devices WHERE id = ?1", params![device_id])
             .expect("delete device")
             > 0
+    }
+
+    fn issue_token(&self, device_id: &str) -> String {
+        let token = random_hex(32);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tokens (token_hash, device_id) VALUES (?1, ?2)",
+            params![sha256_hex(token.as_bytes()), device_id],
+        )
+        .expect("insert token");
+        token
+    }
+
+    fn device_by_token(&self, token: &str) -> Option<Device> {
+        let conn = self.conn.lock().unwrap();
+        let device_id: Option<String> = conn
+            .query_row(
+                "SELECT device_id FROM tokens WHERE token_hash = ?1",
+                params![sha256_hex(token.as_bytes())],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query token");
+        let device_id = device_id?;
+        conn.query_row(
+            "SELECT id, group_id, pubkey FROM devices WHERE id = ?1",
+            params![device_id],
+            |r| {
+                Ok(Device {
+                    id: r.get(0)?,
+                    group_id: r.get(1)?,
+                    pubkey: r.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .expect("query device by token")
+    }
+
+    fn put_attachment(&self, group_id: &str, attachment_id: &str, blob: Vec<u8>) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn
+            .execute(
+                "INSERT OR IGNORE INTO attachments (group_id, attachment_id, blob)
+                 VALUES (?1, ?2, ?3)",
+                params![group_id, attachment_id, blob],
+            )
+            .expect("insert attachment");
+        changed > 0
+    }
+
+    fn get_attachment(&self, group_id: &str, attachment_id: &str) -> Option<Vec<u8>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT blob FROM attachments WHERE group_id = ?1 AND attachment_id = ?2",
+            params![group_id, attachment_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .expect("query attachment")
     }
 
     fn append_change(
@@ -457,6 +580,42 @@ mod tests {
     fn invite_for_missing_group_errors() {
         let s = InMemoryStorage::new();
         assert!(s.create_invite("nope").is_err());
+    }
+
+    #[test]
+    fn tokens_authenticate_and_are_dropped_on_revoke() {
+        let s = InMemoryStorage::new();
+        let (_g, code) = s.create_group();
+        let (dev, _) = s.enroll(&code, vec![1]).unwrap();
+        let token = s.issue_token(&dev);
+        assert_eq!(s.device_by_token(&token).unwrap().id, dev);
+        assert!(s.device_by_token("bogus").is_none());
+        s.revoke_device(&dev);
+        assert!(s.device_by_token(&token).is_none());
+    }
+
+    #[test]
+    fn attachments_are_group_scoped_and_idempotent() {
+        let s = InMemoryStorage::new();
+        let (g, _) = s.create_group();
+        assert!(s.put_attachment(&g, "aa", vec![1, 2, 3]));
+        assert!(!s.put_attachment(&g, "aa", vec![1, 2, 3])); // idempotent
+        assert_eq!(s.get_attachment(&g, "aa").unwrap(), vec![1, 2, 3]);
+        assert!(s.get_attachment("other-group", "aa").is_none());
+    }
+
+    #[test]
+    fn sqlite_tokens_and_attachments() {
+        let s = SqliteStorage::open(":memory:").unwrap();
+        let (g, code) = s.create_group();
+        let (dev, _) = s.enroll(&code, vec![1]).unwrap();
+        let token = s.issue_token(&dev);
+        assert_eq!(s.device_by_token(&token).unwrap().id, dev);
+        assert!(s.put_attachment(&g, "aa", vec![9]));
+        assert!(!s.put_attachment(&g, "aa", vec![0])); // idempotent, keeps original
+        assert_eq!(s.get_attachment(&g, "aa").unwrap(), vec![9]);
+        s.revoke_device(&dev);
+        assert!(s.device_by_token(&token).is_none());
     }
 
     // The trait contract must hold identically for the SQLite backend.

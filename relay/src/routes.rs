@@ -3,8 +3,10 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE};
+use axum::response::IntoResponse;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use note_protocol::{
@@ -12,8 +14,10 @@ use note_protocol::{
     EnrollRequest, EnrollResponse,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
+use crate::storage::Device;
 
 type ApiError = (StatusCode, String);
 
@@ -34,9 +38,11 @@ pub async fn enroll(
         .storage
         .enroll(&req.invite_code, pubkey)
         .map_err(|e| (StatusCode::FORBIDDEN, e.to_string()))?;
+    let device_token = state.storage.issue_token(&device_id);
     Ok(Json(EnrollResponse {
         device_id,
         group_id,
+        device_token,
     }))
 }
 
@@ -95,6 +101,56 @@ pub async fn revoke_device(
     } else {
         Err((StatusCode::NOT_FOUND, "unknown device".to_string()))
     }
+}
+
+/// `PUT /v1/attachments/{id}` — store an encrypted blob (device bearer auth).
+pub async fn put_attachment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let device = authed_device(&state, &headers)?;
+    let computed = hex::encode(Sha256::digest(&body));
+    if computed != id {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "attachment id does not match the body hash".to_string(),
+        ));
+    }
+    let created = state
+        .storage
+        .put_attachment(&device.group_id, &id, body.to_vec());
+    Ok(if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    })
+}
+
+/// `GET /v1/attachments/{id}` — fetch an encrypted blob (device bearer auth).
+pub async fn get_attachment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let device = authed_device(&state, &headers)?;
+    match state.storage.get_attachment(&device.group_id, &id) {
+        Some(blob) => Ok(([(CONTENT_TYPE, "application/octet-stream")], blob)),
+        None => Err((StatusCode::NOT_FOUND, "attachment not found".to_string())),
+    }
+}
+
+fn authed_device(state: &AppState, headers: &HeaderMap) -> Result<Device, ApiError> {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    state
+        .storage
+        .device_by_token(token)
+        .ok_or((StatusCode::UNAUTHORIZED, "invalid device token".to_string()))
 }
 
 fn check_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
