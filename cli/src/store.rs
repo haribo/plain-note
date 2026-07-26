@@ -13,9 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use note_core::{NoteId, NoteStore, Timestamp};
 
-/// Resolve the store file path: `$PN_STORE`, else `$XDG_DATA_HOME/plain-note`,
-/// else `$HOME/.local/share/plain-note`.
-pub fn store_path() -> PathBuf {
+/// Resolve the default store file path: `$PN_STORE`, else
+/// `$XDG_DATA_HOME/plain-note`, else `$HOME/.local/share/plain-note`.
+pub fn default_store_path() -> PathBuf {
     if let Ok(p) = env::var("PN_STORE") {
         return PathBuf::from(p);
     }
@@ -28,25 +28,41 @@ pub fn store_path() -> PathBuf {
     base.join("plain-note").join("store.automerge")
 }
 
-/// Load the store, or start an empty one if the file does not exist yet.
-pub fn load() -> Result<NoteStore> {
-    let path = store_path();
-    match fs::read(&path) {
-        Ok(bytes) => {
-            NoteStore::load(&bytes).with_context(|| format!("loading store at {}", path.display()))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NoteStore::new()),
-        Err(e) => Err(e).with_context(|| format!("reading store at {}", path.display())),
-    }
+/// A note store bound to a file on disk. The path is injected, so tests point at
+/// a temp file instead of the user's real store — the seam that makes the
+/// command logic testable.
+pub struct LocalStore {
+    path: PathBuf,
 }
 
-/// Persist the store, creating the parent directory if needed.
-pub fn save(store: &mut NoteStore) -> Result<()> {
-    let path = store_path();
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+impl LocalStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
     }
-    fs::write(&path, store.save()).with_context(|| format!("writing store at {}", path.display()))
+
+    /// The store at the default (environment-resolved) path.
+    pub fn at_default() -> Self {
+        Self::new(default_store_path())
+    }
+
+    /// Load the store, or start an empty one if the file does not exist yet.
+    pub fn load(&self) -> Result<NoteStore> {
+        match fs::read(&self.path) {
+            Ok(bytes) => NoteStore::load(&bytes)
+                .with_context(|| format!("loading store at {}", self.path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NoteStore::new()),
+            Err(e) => Err(e).with_context(|| format!("reading store at {}", self.path.display())),
+        }
+    }
+
+    /// Persist the store, creating the parent directory if needed.
+    pub fn save(&self, store: &mut NoteStore) -> Result<()> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        fs::write(&self.path, store.save())
+            .with_context(|| format!("writing store at {}", self.path.display()))
+    }
 }
 
 /// Current wall-clock time as unix milliseconds. The clock lives in the client,

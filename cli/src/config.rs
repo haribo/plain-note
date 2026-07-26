@@ -58,9 +58,9 @@ pub fn config_path() -> PathBuf {
 }
 
 impl Settings {
-    pub fn load() -> Result<Self> {
-        let path = config_path();
-        let bytes = fs::read(&path).map_err(|e| {
+    /// Load from an explicit path — the injection seam for tests.
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        let bytes = fs::read(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow!("no sync config — run `pn remote init` or `pn remote pair <blob>` first")
             } else {
@@ -70,14 +70,14 @@ impl Settings {
         serde_json::from_slice(&bytes).context("parsing config")
     }
 
-    pub fn save(&self) -> Result<()> {
-        let path = config_path();
+    /// Save to an explicit path — the injection seam for tests.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let json = serde_json::to_vec_pretty(self)?;
-        fs::write(&path, json).with_context(|| format!("writing config at {}", path.display()))?;
-        restrict_permissions(&path);
+        fs::write(path, json).with_context(|| format!("writing config at {}", path.display()))?;
+        restrict_permissions(path);
         Ok(())
     }
 

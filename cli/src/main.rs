@@ -1,8 +1,9 @@
 //! Plain Note — command-line client (`pn`).
 //!
-//! Drives `core` for local note management (create, edit, organize, search) over
-//! an on-disk Automerge store, and for end-to-end encrypted sync against a relay.
+//! Parses arguments, wires the clock/editor/paths, and prints. All note logic
+//! lives in `commands` (pure, testable) and all networked logic in `remote`.
 
+mod commands;
 mod config;
 mod remote;
 mod store;
@@ -10,6 +11,8 @@ mod store;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use note_core::NoteMeta;
+
+use crate::store::LocalStore;
 
 const SHORT_ID: usize = 8;
 
@@ -98,132 +101,101 @@ enum RemoteCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let store = LocalStore::at_default();
+    let now = store::now_millis();
+
     match cli.command {
         Command::New {
             title,
             folder,
             edit,
-        } => cmd_new(title, folder, edit),
-        Command::List { folder, tag } => cmd_list(folder, tag),
-        Command::Show { id } => cmd_show(&id),
-        Command::Edit { id } => cmd_edit(&id),
-        Command::SetTitle { id, title } => cmd_set_title(&id, &title),
-        Command::SetFolder { id, folder } => cmd_set_folder(&id, &folder),
-        Command::Tag { id, tag } => cmd_tag(&id, &tag),
-        Command::Untag { id, tag } => cmd_untag(&id, &tag),
-        Command::Search { query } => cmd_search(&query),
-        Command::Rm { id } => cmd_rm(&id),
-        Command::Remote { cmd } => match cmd {
-            RemoteCmd::Init { relay, admin } => remote::init(&relay, &admin).await,
-            RemoteCmd::Pair { blob } => remote::pair(&blob).await,
-            RemoteCmd::Devices { admin } => remote::devices(&admin).await,
-            RemoteCmd::Revoke { device_id, admin } => remote::revoke(&admin, &device_id).await,
-        },
-        Command::Sync => remote::sync().await,
-    }
-}
-
-fn cmd_new(title: Option<String>, folder: Option<String>, edit: bool) -> Result<()> {
-    let mut s = store::load()?;
-    let now = store::now_millis();
-    let id = s.create_note(now)?;
-    if let Some(t) = title {
-        s.set_title(&id, &t, now)?;
-    }
-    if let Some(f) = folder {
-        s.set_folder(&id, &f, now)?;
-    }
-    if edit {
-        let body = store::edit_in_editor("")?;
-        s.replace_text(&id, &body, store::now_millis())?;
-    }
-    store::save(&mut s)?;
-    println!("{}", short(id.as_str()));
-    Ok(())
-}
-
-fn cmd_list(folder: Option<String>, tag: Option<String>) -> Result<()> {
-    let s = store::load()?;
-    let mut notes = s.list()?;
-    notes.retain(|n| {
-        folder.as_ref().is_none_or(|f| &n.folder == f)
-            && tag.as_ref().is_none_or(|t| n.tags.iter().any(|x| x == t))
-    });
-    notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
-    print_table(&notes);
-    Ok(())
-}
-
-fn cmd_show(id: &str) -> Result<()> {
-    let s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    let note = s
-        .get_note(&id)?
-        .ok_or_else(|| anyhow::anyhow!("note vanished"))?;
-    print!("{}", note.text);
-    if !note.text.ends_with('\n') {
-        println!();
+        } => {
+            let body = if edit {
+                Some(store::edit_in_editor("")?)
+            } else {
+                None
+            };
+            let id = commands::new_note(
+                &store,
+                now,
+                title.as_deref(),
+                folder.as_deref(),
+                body.as_deref(),
+            )?;
+            println!("{}", short(id.as_str()));
+        }
+        Command::List { folder, tag } => {
+            print_table(&commands::list(&store, folder.as_deref(), tag.as_deref())?);
+        }
+        Command::Search { query } => {
+            print_table(&commands::search(&store, &query)?);
+        }
+        Command::Show { id } => {
+            let note = commands::get(&store, &id)?;
+            print!("{}", note.text);
+            if !note.text.ends_with('\n') {
+                println!();
+            }
+        }
+        Command::Edit { id } => {
+            let current = commands::get(&store, &id)?.text;
+            let edited = store::edit_in_editor(&current)?;
+            if edited != current {
+                commands::set_body(&store, now, &id, &edited)?;
+            }
+        }
+        Command::SetTitle { id, title } => {
+            commands::set_title(&store, now, &id, &title)?;
+        }
+        Command::SetFolder { id, folder } => {
+            commands::set_folder(&store, now, &id, &folder)?;
+        }
+        Command::Tag { id, tag } => {
+            commands::add_tag(&store, now, &id, &tag)?;
+        }
+        Command::Untag { id, tag } => {
+            commands::remove_tag(&store, now, &id, &tag)?;
+        }
+        Command::Rm { id } => {
+            let id = commands::delete(&store, &id)?;
+            println!("deleted {}", short(id.as_str()));
+        }
+        Command::Remote { cmd } => run_remote(cmd).await?,
+        Command::Sync => {
+            let seq = remote::sync(&config::config_path(), &store).await?;
+            println!("synced (seq {seq})");
+        }
     }
     Ok(())
 }
 
-fn cmd_edit(id: &str) -> Result<()> {
-    let mut s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    let current = s
-        .get_note(&id)?
-        .ok_or_else(|| anyhow::anyhow!("note vanished"))?
-        .text;
-    let edited = store::edit_in_editor(&current)?;
-    if edited != current {
-        s.replace_text(&id, &edited, store::now_millis())?;
-        store::save(&mut s)?;
+async fn run_remote(cmd: RemoteCmd) -> Result<()> {
+    let cfg = config::config_path();
+    match cmd {
+        RemoteCmd::Init { relay, admin } => {
+            let blob = remote::init(&cfg, &relay, &admin).await?;
+            println!("Sync initialized. Pair another device with:\n");
+            println!("  pn remote pair {blob}\n");
+        }
+        RemoteCmd::Pair { blob } => {
+            remote::pair(&cfg, &blob).await?;
+            println!("Paired. Run `pn sync`.");
+        }
+        RemoteCmd::Devices { admin } => {
+            let devices = remote::devices(&cfg, &admin).await?;
+            if devices.is_empty() {
+                println!("no devices");
+            }
+            for (id, is_self) in devices {
+                let tag = if is_self { "  (this device)" } else { "" };
+                println!("{id}{tag}");
+            }
+        }
+        RemoteCmd::Revoke { device_id, admin } => {
+            remote::revoke(&cfg, &admin, &device_id).await?;
+            println!("revoked {device_id}");
+        }
     }
-    Ok(())
-}
-
-fn cmd_set_title(id: &str, title: &str) -> Result<()> {
-    let mut s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    s.set_title(&id, title, store::now_millis())?;
-    store::save(&mut s)
-}
-
-fn cmd_set_folder(id: &str, folder: &str) -> Result<()> {
-    let mut s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    s.set_folder(&id, folder, store::now_millis())?;
-    store::save(&mut s)
-}
-
-fn cmd_tag(id: &str, tag: &str) -> Result<()> {
-    let mut s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    s.add_tag(&id, tag, store::now_millis())?;
-    store::save(&mut s)
-}
-
-fn cmd_untag(id: &str, tag: &str) -> Result<()> {
-    let mut s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    s.remove_tag(&id, tag, store::now_millis())?;
-    store::save(&mut s)
-}
-
-fn cmd_search(query: &str) -> Result<()> {
-    let s = store::load()?;
-    let mut hits = s.search(query)?;
-    hits.sort_by_key(|n| std::cmp::Reverse(n.updated));
-    print_table(&hits);
-    Ok(())
-}
-
-fn cmd_rm(id: &str) -> Result<()> {
-    let mut s = store::load()?;
-    let id = store::resolve_id(&s, id)?;
-    s.delete_note(&id)?;
-    store::save(&mut s)?;
-    println!("deleted {}", short(id.as_str()));
     Ok(())
 }
 
