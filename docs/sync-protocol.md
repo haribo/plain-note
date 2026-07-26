@@ -75,9 +75,12 @@ Auth is a credential the relay issues; it gates connection, not decryption.
    revocable invitation code** bound to a `group_id` (existing or new). Codes
    expire.
 2. **Device enrolls.** The device generates its Ed25519 keypair and calls
-   `POST /v1/enroll { invite_code, device_pubkey, group_id }`. The relay
-   verifies the code, records `(group_id, device_id, device_pubkey)`, marks the
-   code used, and returns a `device_id`.
+   `POST /v1/enroll { invite_code, device_pubkey }`. The relay verifies the code,
+   records `(group_id, device_id, device_pubkey)`, marks the code used, and
+   returns `{ device_id, group_id, device_token }`. The `device_token` is a
+   bearer secret for authenticated HTTP calls (attachment upload/download);
+   the relay stores only its hash. WebSocket sync uses the Ed25519 key, not the
+   token.
 3. **Session auth (challenge-response)** on every WebSocket connect:
    - Client opens the socket and sends `Hello`.
    - Relay replies with a random `challenge` (32 bytes).

@@ -51,6 +51,15 @@ pn search <query>                                 # aliases: pn s / pn find
 pn rm <id>
 ```
 
+Attachments are encrypted client-side and stored on the relay (needs sync set up):
+
+```sh
+pn attach <note-id> <file>                        # encrypt + upload, link to the note
+pn attachments <note-id>                          # list "id  filename"
+pn fetch <note-id> <att-id> [--out <path>]        # download + decrypt
+pn detach <note-id> <att-id>                       # drop the reference
+```
+
 Folders form a real tree (create / rename / move / delete):
 
 ```sh
