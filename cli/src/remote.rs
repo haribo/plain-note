@@ -221,18 +221,22 @@ mod tests {
         let store_a = LocalStore::new(dir.join("a.automerge"));
         let store_b = LocalStore::new(dir.join("b.automerge"));
 
-        // A: init, create a note, sync (push).
+        // A: init, create a folder + note in it, sync (push).
         let blob = init(&cfg_a, &base, "adm").await.unwrap();
-        commands::new_note(&store_a, 1, Some("Shared"), Some("work"), Some("hi")).unwrap();
+        let work = commands::create_folder(&store_a, 1, "work", None).unwrap();
+        commands::new_note(&store_a, 1, Some("Shared"), Some(work.as_str()), Some("hi")).unwrap();
         sync(&cfg_a, &store_a).await.unwrap();
 
-        // B: pair, sync (pull) — sees A's note.
+        // B: pair, sync (pull) — sees A's note and folder.
         pair(&cfg_b, &blob).await.unwrap();
         sync(&cfg_b, &store_b).await.unwrap();
         let seen = commands::list(&store_b, None, None).unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].title, "Shared");
-        assert_eq!(seen[0].folder, "work");
+        assert_eq!(
+            commands::folder_path(&store_b, &seen[0].folder).unwrap(),
+            "work"
+        );
 
         // Revoke B; its next sync is rejected.
         let b_device = Settings::load_from(&cfg_b).unwrap().device_id;

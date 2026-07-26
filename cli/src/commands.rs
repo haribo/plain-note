@@ -6,9 +6,9 @@
 //! printing and the editor/clock wiring.
 
 use anyhow::{Result, anyhow};
-use note_core::{Note, NoteId, NoteMeta, Timestamp};
+use note_core::{FolderId, FolderMeta, Note, NoteId, NoteMeta, Timestamp};
 
-use crate::store::{LocalStore, resolve_id};
+use crate::store::{LocalStore, resolve_folder_id, resolve_id};
 
 pub fn new_note(
     store: &LocalStore,
@@ -18,12 +18,18 @@ pub fn new_note(
     body: Option<&str>,
 ) -> Result<NoteId> {
     let mut doc = store.load()?;
+    // Resolve the folder prefix before creating the note, so a bad folder id
+    // fails before we write anything.
+    let folder_id = match folder {
+        Some(p) => Some(resolve_folder_id(&doc, p)?.as_str().to_string()),
+        None => None,
+    };
     let id = doc.create_note(now)?;
     if let Some(t) = title {
         doc.set_title(&id, t, now)?;
     }
-    if let Some(f) = folder {
-        doc.set_folder(&id, f, now)?;
+    if let Some(f) = folder_id {
+        doc.move_note(&id, &f, now)?;
     }
     if let Some(b) = body {
         doc.replace_text(&id, b, now)?;
@@ -34,9 +40,14 @@ pub fn new_note(
 
 pub fn list(store: &LocalStore, folder: Option<&str>, tag: Option<&str>) -> Result<Vec<NoteMeta>> {
     let doc = store.load()?;
+    // Accept a folder id prefix for the filter, like every other folder input.
+    let folder_id = match folder {
+        Some(p) => Some(resolve_folder_id(&doc, p)?.as_str().to_string()),
+        None => None,
+    };
     let mut notes = doc.list()?;
     notes.retain(|n| {
-        folder.is_none_or(|f| n.folder.as_str() == f)
+        folder_id.as_deref().is_none_or(|f| n.folder.as_str() == f)
             && tag.is_none_or(|t| n.tags.iter().any(|x| x == t))
     });
     notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
@@ -69,17 +80,92 @@ pub fn set_title(
     Ok(id)
 }
 
-pub fn set_folder(
+/// Move a note into a folder given by id-prefix, or to the root (`None`).
+pub fn move_note(
     store: &LocalStore,
     now: Timestamp,
-    id_prefix: &str,
-    folder: &str,
+    note_prefix: &str,
+    folder_prefix: Option<&str>,
 ) -> Result<NoteId> {
     let mut doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.set_folder(&id, folder, now)?;
+    let id = resolve_id(&doc, note_prefix)?;
+    let folder = match folder_prefix {
+        Some(p) => resolve_folder_id(&doc, p)?.as_str().to_string(),
+        None => note_core::ROOT_FOLDER.to_string(),
+    };
+    doc.move_note(&id, &folder, now)?;
     store.save(&mut doc)?;
     Ok(id)
+}
+
+/// A folder with its resolved display path, for listing.
+pub struct FolderRow {
+    pub meta: FolderMeta,
+    pub path: String,
+}
+
+pub fn create_folder(
+    store: &LocalStore,
+    now: Timestamp,
+    name: &str,
+    parent_prefix: Option<&str>,
+) -> Result<FolderId> {
+    let mut doc = store.load()?;
+    let parent = match parent_prefix {
+        Some(p) => resolve_folder_id(&doc, p)?.as_str().to_string(),
+        None => note_core::ROOT_FOLDER.to_string(),
+    };
+    let id = doc.create_folder(name, &parent, now)?;
+    store.save(&mut doc)?;
+    Ok(id)
+}
+
+pub fn list_folders(store: &LocalStore) -> Result<Vec<FolderRow>> {
+    let doc = store.load()?;
+    let mut rows = Vec::new();
+    for meta in doc.list_folders()? {
+        let path = doc.folder_path(meta.id.as_str())?;
+        rows.push(FolderRow { meta, path });
+    }
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(rows)
+}
+
+pub fn rename_folder(store: &LocalStore, id_prefix: &str, name: &str) -> Result<FolderId> {
+    let mut doc = store.load()?;
+    let id = resolve_folder_id(&doc, id_prefix)?;
+    doc.rename_folder(&id, name)?;
+    store.save(&mut doc)?;
+    Ok(id)
+}
+
+pub fn move_folder(
+    store: &LocalStore,
+    id_prefix: &str,
+    new_parent_prefix: Option<&str>,
+) -> Result<FolderId> {
+    let mut doc = store.load()?;
+    let id = resolve_folder_id(&doc, id_prefix)?;
+    let parent = match new_parent_prefix {
+        Some(p) => resolve_folder_id(&doc, p)?.as_str().to_string(),
+        None => note_core::ROOT_FOLDER.to_string(),
+    };
+    doc.move_folder(&id, &parent)?;
+    store.save(&mut doc)?;
+    Ok(id)
+}
+
+pub fn delete_folder(store: &LocalStore, now: Timestamp, id_prefix: &str) -> Result<FolderId> {
+    let mut doc = store.load()?;
+    let id = resolve_folder_id(&doc, id_prefix)?;
+    doc.delete_folder(&id, now)?;
+    store.save(&mut doc)?;
+    Ok(id)
+}
+
+/// Resolve a note's folder id to a display path (for listings). Empty = root.
+pub fn folder_path(store: &LocalStore, folder_id: &str) -> Result<String> {
+    Ok(store.load()?.folder_path(folder_id)?)
 }
 
 /// Replace a note's Markdown body (used by `edit` once the editor returns).
@@ -139,18 +225,43 @@ mod tests {
     }
 
     #[test]
-    fn create_list_and_filter() {
+    fn create_list_and_filter_by_folder() {
         let (s, path) = temp_store();
-        let a = new_note(&s, 10, Some("Rust"), Some("dev"), Some("ownership")).unwrap();
-        let _b = new_note(&s, 20, Some("Milk"), Some("home"), None).unwrap();
+        let dev = create_folder(&s, 1, "dev", None).unwrap();
+        let a = new_note(&s, 10, Some("Rust"), Some(dev.as_str()), Some("ownership")).unwrap();
+        let _b = new_note(&s, 20, Some("Milk"), None, None).unwrap();
 
         let all = list(&s, None, None).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].updated, 20); // newest first
 
-        let dev = list(&s, Some("dev"), None).unwrap();
-        assert_eq!(dev.len(), 1);
-        assert_eq!(dev[0].id, a);
+        let in_dev = list(&s, Some(dev.as_str()), None).unwrap();
+        assert_eq!(in_dev.len(), 1);
+        assert_eq!(in_dev[0].id, a);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn folder_commands() {
+        let (s, path) = temp_store();
+        let work = create_folder(&s, 1, "work", None).unwrap();
+        let proj = create_folder(&s, 1, "projects", Some(work.as_str())).unwrap();
+
+        let rows = list_folders(&s).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r.path == "work/projects"));
+
+        rename_folder(&s, proj.as_str(), "proj").unwrap();
+        move_folder(&s, proj.as_str(), None).unwrap();
+        let rows = list_folders(&s).unwrap();
+        assert!(rows.iter().any(|r| r.path == "proj"));
+
+        // Move a note in, then delete the folder — the note reparents to root.
+        let n = new_note(&s, 1, Some("N"), None, None).unwrap();
+        move_note(&s, 2, n.as_str(), Some(work.as_str())).unwrap();
+        delete_folder(&s, 3, work.as_str()).unwrap();
+        assert_eq!(get(&s, n.as_str()).unwrap().folder, note_core::ROOT_FOLDER);
 
         let _ = std::fs::remove_file(path);
     }
@@ -178,16 +289,17 @@ mod tests {
     #[test]
     fn edits_persist_across_reload() {
         let (s, path) = temp_store();
+        let work = create_folder(&s, 1, "work", None).unwrap();
         let id = new_note(&s, 1, None, None, None).unwrap();
         set_title(&s, 2, id.as_str(), "Renamed").unwrap();
-        set_folder(&s, 3, id.as_str(), "work").unwrap();
+        move_note(&s, 3, id.as_str(), Some(work.as_str())).unwrap();
         set_body(&s, 4, id.as_str(), "hello").unwrap();
 
         // A fresh LocalStore at the same path re-reads from disk.
         let reopened = LocalStore::new(path.clone());
         let note = get(&reopened, id.as_str()).unwrap();
         assert_eq!(note.title, "Renamed");
-        assert_eq!(note.folder, "work");
+        assert_eq!(note.folder, work.as_str());
         assert_eq!(note.text, "hello");
 
         let _ = std::fs::remove_file(path);

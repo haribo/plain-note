@@ -11,7 +11,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use note_core::{NoteId, NoteStore, Timestamp};
+use note_core::{FolderId, NoteId, NoteStore, Timestamp};
 
 /// Resolve the default store file path: `$PN_STORE`, else
 /// `$XDG_DATA_HOME/plain-note`, else `$HOME/.local/share/plain-note`.
@@ -72,6 +72,24 @@ pub fn now_millis() -> Timestamp {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as Timestamp)
         .unwrap_or(0)
+}
+
+/// Resolve a possibly-abbreviated folder id to a full one. Accepts any unique
+/// prefix of an existing folder's hex id.
+pub fn resolve_folder_id(store: &NoteStore, prefix: &str) -> Result<FolderId> {
+    let matches: Vec<FolderId> = store
+        .list_folders()?
+        .into_iter()
+        .map(|f| f.id)
+        .filter(|id| id.as_str().starts_with(prefix))
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => Err(anyhow!("no folder matches id '{prefix}'")),
+        n => Err(anyhow!(
+            "folder id '{prefix}' is ambiguous ({n} folders match)"
+        )),
+    }
 }
 
 /// Resolve a possibly-abbreviated note id to a full one. Accepts any unique
