@@ -23,7 +23,7 @@ See [`docs/design/overview.md`](docs/design/overview.md) for the full design and
 | `protocol/`   | Rust — wire types shared by client and relay |
 | `cli/`        | Rust — command-line client (binary: `pn`) |
 | `relay/`      | Rust — zero-knowledge relay server (binary: `pn-relay`, Axum + WebSocket) |
-| Linux GUI     | GTK4 (planned) |
+| `gui/`        | Rust — GTK4 + libadwaita desktop client (binary: `plain-note-gui`) |
 | Android       | Kotlin/Jetpack Compose over the Rust core via UniFFI (planned) |
 
 ## Build
@@ -103,10 +103,22 @@ pn sync
 Sync config lives at `$XDG_CONFIG_HOME/plain-note/config.json` (override with
 `$PN_CONFIG`); it holds this device's credentials and the E2E key.
 
+## GUI
+
+A GTK4 + libadwaita desktop client shares the same store as `pn`:
+
+```sh
+cargo run -p plain-note-gui
+```
+
+v1 covers local editing (note list + Markdown editor + auto-save). Folder tree,
+tags, search, and live auto-sync in the GUI are in progress. Needs GTK 4 and
+libadwaita installed.
+
 ## Roadmap
 
 1. **Core + CLI + relay** — encrypted sync validated end to end. ✔
-2. **Linux GUI** (GTK4).
+2. **Linux GUI** (GTK4 + libadwaita) — in progress.
 3. **Android** (Kotlin/Compose via UniFFI).
 
 ## License
