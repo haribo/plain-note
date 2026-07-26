@@ -11,6 +11,7 @@ use adw::prelude::*;
 use gtk::glib;
 use note_core::{FolderId, NoteId, NoteStore, ROOT_FOLDER};
 use plain_note_client::store::{self, LocalStore};
+use plain_note_client::{config, remote};
 
 const APP_ID: &str = "dev.plainnote.PlainNote";
 
@@ -23,6 +24,7 @@ struct State {
     filter: Option<String>, // folder id filter; None = all
     query: String,
     loading: bool,
+    last_sig: String, // signature of the last-rendered content, to skip no-op reloads
 }
 
 impl State {
@@ -38,9 +40,15 @@ struct Ui {
     folder_list: gtk::ListBox,
     note_list: gtk::ListBox,
     title: gtk::Entry,
+    text_view: gtk::TextView,
     buffer: gtk::TextBuffer,
     tags_box: gtk::Box,
     subtitle: adw::WindowTitle,
+}
+
+enum SyncMsg {
+    Done,
+    Error,
 }
 
 fn main() -> glib::ExitCode {
@@ -66,6 +74,7 @@ fn build_ui(app: &adw::Application) {
         filter: None,
         query: String::new(),
         loading: false,
+        last_sig: String::new(),
     }));
 
     // --- Sidebar ---
@@ -175,6 +184,7 @@ fn build_ui(app: &adw::Application) {
         folder_list: folder_list.clone(),
         note_list: note_list.clone(),
         title: title.clone(),
+        text_view: text_view.clone(),
         buffer: buffer.clone(),
         tags_box,
         subtitle,
@@ -182,6 +192,13 @@ fn build_ui(app: &adw::Application) {
 
     rebuild_folders(&ui, &state);
     rebuild_notes(&ui, &state);
+
+    // Live auto-sync (only if the device is enrolled).
+    let sync_label = gtk::Label::new(None);
+    sync_label.add_css_class("dim-label");
+    sync_label.add_css_class("caption");
+    content_header.pack_end(&sync_label);
+    start_auto_sync(&ui, &state, &sync_label);
 
     // Folder selection -> filter.
     {
@@ -543,6 +560,113 @@ fn rebuild_tags(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
         });
         ui.tags_box.append(&chip);
     }
+}
+
+/// Start a background sync loop (own thread + Tokio runtime) if the device is
+/// enrolled. Each sync result is delivered to the GTK main loop, which reloads
+/// the store when its content actually changed.
+fn start_auto_sync(ui: &Ui, state: &Rc<RefCell<State>>, label: &gtk::Label) {
+    let cfg = config::config_path();
+    if config::Settings::load_from(&cfg).is_err() {
+        return; // not enrolled — the GUI stays local-only
+    }
+
+    let (tx, rx) = async_channel::unbounded::<SyncMsg>();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async move {
+            let store = LocalStore::at_default();
+            loop {
+                let msg = match remote::sync(&cfg, &store).await {
+                    Ok(_) => SyncMsg::Done,
+                    Err(_) => SyncMsg::Error,
+                };
+                if tx.send(msg).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    });
+
+    let ui = ui.clone();
+    let state = state.clone();
+    let label = label.clone();
+    glib::spawn_future_local(async move {
+        while let Ok(msg) = rx.recv().await {
+            match msg {
+                SyncMsg::Done => {
+                    label.set_text("synchronisé");
+                    maybe_reload(&ui, &state);
+                }
+                SyncMsg::Error => label.set_text("hors ligne"),
+            }
+        }
+    });
+}
+
+/// Reload the store from disk if its visible content changed, preserving the
+/// user's selection and not interrupting active typing.
+fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
+    let Ok(doc) = state.borrow().store.load() else {
+        return;
+    };
+    let sig = content_sig(&doc);
+    if sig == state.borrow().last_sig {
+        return;
+    }
+    let editing = ui.title.has_focus() || ui.text_view.has_focus();
+    let current = state.borrow().current.clone();
+    {
+        let mut st = state.borrow_mut();
+        st.doc = doc;
+        st.last_sig = sig;
+    }
+    rebuild_folders(ui, state);
+    rebuild_notes(ui, state);
+
+    if !editing && let Some(id) = current {
+        let idx = state.borrow().note_ids.iter().position(|n| n == &id);
+        if let Some(idx) = idx
+            && let Some(row) = ui.note_list.row_at_index(idx as i32)
+        {
+            ui.note_list.select_row(Some(&row));
+        }
+    }
+}
+
+/// A cheap signature of the store's visible content (folders + note metadata),
+/// used to skip rebuilds when a sync changed nothing.
+fn content_sig(doc: &NoteStore) -> String {
+    let mut s = String::new();
+    if let Ok(folders) = doc.list_folders() {
+        for f in folders {
+            s.push_str(f.id.as_str());
+            s.push(':');
+            s.push_str(&f.name);
+            s.push('/');
+            s.push_str(&f.parent);
+            s.push(';');
+        }
+    }
+    if let Ok(notes) = doc.list() {
+        for n in notes {
+            s.push_str(n.id.as_str());
+            s.push(':');
+            s.push_str(&n.title);
+            s.push('@');
+            s.push_str(&n.updated.to_string());
+            s.push('#');
+            s.push_str(&n.tags.join(","));
+            s.push(';');
+        }
+    }
+    s
 }
 
 fn install_css() {
