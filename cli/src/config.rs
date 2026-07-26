@@ -27,6 +27,9 @@ pub struct Settings {
     pub signing_seed: String,
     /// base64 shared E2E key (32 bytes) — content encryption.
     pub e2e_key: String,
+    /// Bearer token for authenticated HTTP calls (attachment upload/download).
+    #[serde(default)]
+    pub device_token: String,
     /// Highest relay `seq` already applied locally.
     #[serde(default)]
     pub last_seq: u64,

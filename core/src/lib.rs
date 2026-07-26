@@ -10,7 +10,9 @@ pub mod crypto;
 pub mod model;
 pub mod sync;
 
-pub use crypto::{Aad, CryptoError, GroupKey, Kind, open, seal};
+pub use crypto::{
+    Aad, CryptoError, GroupKey, Kind, attachment_id, open, open_attachment, seal, seal_attachment,
+};
 pub use model::{
     FolderId, FolderMeta, ModelError, Note, NoteId, NoteMeta, NoteStore, ROOT_FOLDER, Timestamp,
 };

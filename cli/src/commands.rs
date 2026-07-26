@@ -206,6 +206,36 @@ pub fn delete(store: &LocalStore, id_prefix: &str) -> Result<NoteId> {
     Ok(id)
 }
 
+/// A note's attachment references as `(attachment_id, filename)`.
+pub fn attachments(store: &LocalStore, note_prefix: &str) -> Result<Vec<(String, String)>> {
+    Ok(get(store, note_prefix)?.attachments)
+}
+
+/// Drop an attachment reference from a note (the blob stays on the relay).
+/// Returns the removed attachment id.
+pub fn detach(
+    store: &LocalStore,
+    now: Timestamp,
+    note_prefix: &str,
+    att_prefix: &str,
+) -> Result<String> {
+    let mut doc = store.load()?;
+    let id = resolve_id(&doc, note_prefix)?;
+    let note = doc.get_note(&id)?.ok_or_else(|| anyhow!("note vanished"))?;
+    let mut matches = note
+        .attachments
+        .into_iter()
+        .filter(|(a, _)| a.starts_with(att_prefix));
+    let att = match (matches.next(), matches.next()) {
+        (Some((a, _)), None) => a,
+        (None, _) => return Err(anyhow!("no attachment matches '{att_prefix}'")),
+        (Some(_), Some(_)) => return Err(anyhow!("attachment id '{att_prefix}' is ambiguous")),
+    };
+    doc.remove_attachment(&id, &att, now)?;
+    store.save(&mut doc)?;
+    Ok(att)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -153,7 +153,8 @@ pub struct Note {
     pub folder: String,
     pub text: String,
     pub tags: Vec<String>,
-    pub attachments: Vec<String>,
+    /// Attachment references as `(attachment_id, filename)`.
+    pub attachments: Vec<(String, String)>,
     pub created: Timestamp,
     pub updated: Timestamp,
 }
@@ -313,15 +314,17 @@ impl NoteStore {
         self.touch(&note, now)
     }
 
+    /// Reference an attachment by id, remembering its `filename` for downloads.
     pub fn add_attachment(
         &mut self,
         id: &NoteId,
         attachment_id: &str,
+        filename: &str,
         now: Timestamp,
     ) -> Result<(), ModelError> {
         let note = self.note_obj(id)?;
         let att = self.child_map(&note, ATTACHMENTS)?;
-        self.doc.put(&att, attachment_id, true)?;
+        self.doc.put(&att, attachment_id, filename)?;
         self.touch(&note, now)
     }
 
@@ -419,7 +422,7 @@ impl NoteStore {
             folder: self.str_field(&note, FOLDER)?,
             text: self.doc.text(&text_obj)?,
             tags: self.keys_of(&note, TAGS)?,
-            attachments: self.keys_of(&note, ATTACHMENTS)?,
+            attachments: self.entries_of(&note, ATTACHMENTS)?,
             created: self.int_field(&note, CREATED)?,
             updated: self.int_field(&note, UPDATED)?,
         }))
@@ -604,6 +607,22 @@ impl NoteStore {
         }
     }
 
+    /// Key/string-value pairs of a child map, sorted by key.
+    fn entries_of(&self, note: &ObjId, key: &str) -> Result<Vec<(String, String)>, ModelError> {
+        match self.child_object(note, key)? {
+            Some(map) => {
+                let mut out = Vec::new();
+                for k in self.doc.keys(&map) {
+                    let v = self.str_field(&map, &k)?;
+                    out.push((k, v));
+                }
+                out.sort();
+                Ok(out)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn meta_of(&self, id_str: &str) -> Result<NoteMeta, ModelError> {
         let note = self
             .child_object(&ROOT, id_str)?
@@ -746,14 +765,17 @@ mod tests {
     }
 
     #[test]
-    fn attachments_tracked() {
+    fn attachments_tracked_with_filenames() {
         let mut s = NoteStore::new();
         let id = s.create_note(1).unwrap();
-        s.add_attachment(&id, "aa", 2).unwrap();
-        s.add_attachment(&id, "bb", 3).unwrap();
+        s.add_attachment(&id, "aa", "diagram.png", 2).unwrap();
+        s.add_attachment(&id, "bb", "notes.pdf", 3).unwrap();
         assert_eq!(
             s.get_note(&id).unwrap().unwrap().attachments,
-            vec!["aa", "bb"]
+            vec![
+                ("aa".to_string(), "diagram.png".to_string()),
+                ("bb".to_string(), "notes.pdf".to_string()),
+            ]
         );
     }
 
