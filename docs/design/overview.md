@@ -36,8 +36,8 @@ between different users, rich-text WYSIWYG.
 - **Images / attachments**: stored as **separate files**, referenced from the
   Markdown (`![caption](attachments/xxx.png)`). Each attachment is encrypted as
   an independent blob and synced separately, so only what changed is uploaded.
-- **Organization**: folders **and** tags (a note lives in one folder, can carry
-  many tags).
+- **Organization**: a nested folder tree **and** tags (a note lives in one
+  folder — which may be nested — and can carry many tags).
 - **Search**: full-text search over note content.
 - **Source of truth**: the CRDT document (see §5), not the raw `.md` file. The
   local `.md` is a readable export/import surface; external edits are re-imported

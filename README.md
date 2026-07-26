@@ -36,19 +36,30 @@ cargo test --workspace
 ## CLI usage
 
 `pn` manages a local Automerge store (default `$XDG_DATA_HOME/plain-note`,
-override with `$PN_STORE`). Note ids accept any unique prefix; common commands
-have short aliases.
+override with `$PN_STORE`). Note and folder ids accept any unique prefix; common
+commands have short aliases.
 
 ```sh
-pn new --title "Meeting" --folder work --edit   # alias: pn n — opens $EDITOR
-pn list [--folder work] [--tag urgent]          # alias: pn ls — newest first
-pn show <id>                                     # print Markdown body
-pn edit <id>                                     # alias: pn e — edit in $EDITOR
+pn new --title "Meeting" [--folder <id>] --edit  # alias: pn n — opens $EDITOR
+pn list [--folder <id>] [--tag urgent]           # alias: pn ls — newest first
+pn show <id>                                      # print Markdown body
+pn edit <id>                                      # alias: pn e — edit in $EDITOR
 pn set-title <id> <title>
-pn set-folder <id> <folder>
+pn mv <id> [--to <folder-id>]                     # move note (omit --to for root)
 pn tag <id> <tag> | pn untag <id> <tag>
-pn search <query>                                # aliases: pn s / pn find
+pn search <query>                                 # aliases: pn s / pn find
 pn rm <id>
+```
+
+Folders form a real tree (create / rename / move / delete):
+
+```sh
+pn folder new work                               # -> prints folder id
+pn folder new projects --parent <work-id>
+pn folder ls                                      # tree, one "id  path" per line
+pn folder rename <id> <name>
+pn folder mv <id> [--to <parent-id>]             # omit --to to move to the top level
+pn folder rm <id>                                 # its notes/subfolders move to its parent
 ```
 
 ### Sync
