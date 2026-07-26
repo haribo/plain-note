@@ -1,0 +1,32 @@
+[package]
+name = "note-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "note_relay"
+
+[[bin]]
+name = "pn-relay"
+path = "src/main.rs"
+
+[dependencies]
+note-protocol.workspace = true
+tokio.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ed25519-dalek.workspace = true
+base64.workspace = true
+hex.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
+tower = { version = "0.5", features = ["util"] }
