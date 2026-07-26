@@ -19,6 +19,7 @@ base64.workspace = true
 hex.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
+fs2 = "0.4"
 
 [dev-dependencies]
 note-relay.workspace = true

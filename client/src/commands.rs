@@ -17,54 +17,56 @@ pub fn new_note(
     folder: Option<&str>,
     body: Option<&str>,
 ) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    // Resolve the folder prefix before creating the note, so a bad folder id
-    // fails before we write anything.
-    let folder_id = match folder {
-        Some(p) => Some(resolve_folder_id(&doc, p)?.as_str().to_string()),
-        None => None,
-    };
-    let id = doc.create_note(now)?;
-    if let Some(t) = title {
-        doc.set_title(&id, t, now)?;
-    }
-    if let Some(f) = folder_id {
-        doc.move_note(&id, &f, now)?;
-    }
-    if let Some(b) = body {
-        doc.replace_text(&id, b, now)?;
-    }
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        // Resolve the folder prefix first, so a bad folder id fails before any write.
+        let folder_id = match folder {
+            Some(p) => Some(resolve_folder_id(doc, p)?.as_str().to_string()),
+            None => None,
+        };
+        let id = doc.create_note(now)?;
+        if let Some(t) = title {
+            doc.set_title(&id, t, now)?;
+        }
+        if let Some(f) = folder_id {
+            doc.move_note(&id, &f, now)?;
+        }
+        if let Some(b) = body {
+            doc.replace_text(&id, b, now)?;
+        }
+        Ok(id)
+    })
 }
 
 pub fn list(store: &LocalStore, folder: Option<&str>, tag: Option<&str>) -> Result<Vec<NoteMeta>> {
-    let doc = store.load()?;
-    // Accept a folder id prefix for the filter, like every other folder input.
-    let folder_id = match folder {
-        Some(p) => Some(resolve_folder_id(&doc, p)?.as_str().to_string()),
-        None => None,
-    };
-    let mut notes = doc.list()?;
-    notes.retain(|n| {
-        folder_id.as_deref().is_none_or(|f| n.folder.as_str() == f)
-            && tag.is_none_or(|t| n.tags.iter().any(|x| x == t))
-    });
-    notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
-    Ok(notes)
+    store.read(|doc| {
+        // Accept a folder id prefix for the filter, like every other folder input.
+        let folder_id = match folder {
+            Some(p) => Some(resolve_folder_id(doc, p)?.as_str().to_string()),
+            None => None,
+        };
+        let mut notes = doc.list()?;
+        notes.retain(|n| {
+            folder_id.as_deref().is_none_or(|f| n.folder.as_str() == f)
+                && tag.is_none_or(|t| n.tags.iter().any(|x| x == t))
+        });
+        notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
+        Ok(notes)
+    })
 }
 
 pub fn search(store: &LocalStore, query: &str) -> Result<Vec<NoteMeta>> {
-    let doc = store.load()?;
-    let mut hits = doc.search(query)?;
-    hits.sort_by_key(|n| std::cmp::Reverse(n.updated));
-    Ok(hits)
+    store.read(|doc| {
+        let mut hits = doc.search(query)?;
+        hits.sort_by_key(|n| std::cmp::Reverse(n.updated));
+        Ok(hits)
+    })
 }
 
 pub fn get(store: &LocalStore, id_prefix: &str) -> Result<Note> {
-    let doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.get_note(&id)?.ok_or_else(|| anyhow!("note vanished"))
+    store.read(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.get_note(&id)?.ok_or_else(|| anyhow!("note vanished"))
+    })
 }
 
 pub fn set_title(
@@ -73,11 +75,11 @@ pub fn set_title(
     id_prefix: &str,
     title: &str,
 ) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.set_title(&id, title, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.set_title(&id, title, now)?;
+        Ok(id)
+    })
 }
 
 /// Move a note into a folder given by id-prefix, or to the root (`None`).
@@ -87,15 +89,15 @@ pub fn move_note(
     note_prefix: &str,
     folder_prefix: Option<&str>,
 ) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, note_prefix)?;
-    let folder = match folder_prefix {
-        Some(p) => resolve_folder_id(&doc, p)?.as_str().to_string(),
-        None => note_core::ROOT_FOLDER.to_string(),
-    };
-    doc.move_note(&id, &folder, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_id(doc, note_prefix)?;
+        let folder = match folder_prefix {
+            Some(p) => resolve_folder_id(doc, p)?.as_str().to_string(),
+            None => note_core::ROOT_FOLDER.to_string(),
+        };
+        doc.move_note(&id, &folder, now)?;
+        Ok(id)
+    })
 }
 
 /// A folder with its resolved display path, for listing.
@@ -110,33 +112,33 @@ pub fn create_folder(
     name: &str,
     parent_prefix: Option<&str>,
 ) -> Result<FolderId> {
-    let mut doc = store.load()?;
-    let parent = match parent_prefix {
-        Some(p) => resolve_folder_id(&doc, p)?.as_str().to_string(),
-        None => note_core::ROOT_FOLDER.to_string(),
-    };
-    let id = doc.create_folder(name, &parent, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let parent = match parent_prefix {
+            Some(p) => resolve_folder_id(doc, p)?.as_str().to_string(),
+            None => note_core::ROOT_FOLDER.to_string(),
+        };
+        Ok(doc.create_folder(name, &parent, now)?)
+    })
 }
 
 pub fn list_folders(store: &LocalStore) -> Result<Vec<FolderRow>> {
-    let doc = store.load()?;
-    let mut rows = Vec::new();
-    for meta in doc.list_folders()? {
-        let path = doc.folder_path(meta.id.as_str())?;
-        rows.push(FolderRow { meta, path });
-    }
-    rows.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(rows)
+    store.read(|doc| {
+        let mut rows = Vec::new();
+        for meta in doc.list_folders()? {
+            let path = doc.folder_path(meta.id.as_str())?;
+            rows.push(FolderRow { meta, path });
+        }
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(rows)
+    })
 }
 
 pub fn rename_folder(store: &LocalStore, id_prefix: &str, name: &str) -> Result<FolderId> {
-    let mut doc = store.load()?;
-    let id = resolve_folder_id(&doc, id_prefix)?;
-    doc.rename_folder(&id, name)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_folder_id(doc, id_prefix)?;
+        doc.rename_folder(&id, name)?;
+        Ok(id)
+    })
 }
 
 pub fn move_folder(
@@ -144,45 +146,45 @@ pub fn move_folder(
     id_prefix: &str,
     new_parent_prefix: Option<&str>,
 ) -> Result<FolderId> {
-    let mut doc = store.load()?;
-    let id = resolve_folder_id(&doc, id_prefix)?;
-    let parent = match new_parent_prefix {
-        Some(p) => resolve_folder_id(&doc, p)?.as_str().to_string(),
-        None => note_core::ROOT_FOLDER.to_string(),
-    };
-    doc.move_folder(&id, &parent)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_folder_id(doc, id_prefix)?;
+        let parent = match new_parent_prefix {
+            Some(p) => resolve_folder_id(doc, p)?.as_str().to_string(),
+            None => note_core::ROOT_FOLDER.to_string(),
+        };
+        doc.move_folder(&id, &parent)?;
+        Ok(id)
+    })
 }
 
 pub fn delete_folder(store: &LocalStore, now: Timestamp, id_prefix: &str) -> Result<FolderId> {
-    let mut doc = store.load()?;
-    let id = resolve_folder_id(&doc, id_prefix)?;
-    doc.delete_folder(&id, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_folder_id(doc, id_prefix)?;
+        doc.delete_folder(&id, now)?;
+        Ok(id)
+    })
 }
 
 /// Resolve a note's folder id to a display path (for listings). Empty = root.
 pub fn folder_path(store: &LocalStore, folder_id: &str) -> Result<String> {
-    Ok(store.load()?.folder_path(folder_id)?)
+    store.read(|doc| Ok(doc.folder_path(folder_id)?))
 }
 
 /// Replace a note's Markdown body (used by `edit` once the editor returns).
 pub fn set_body(store: &LocalStore, now: Timestamp, id_prefix: &str, body: &str) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.replace_text(&id, body, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.replace_text(&id, body, now)?;
+        Ok(id)
+    })
 }
 
 pub fn add_tag(store: &LocalStore, now: Timestamp, id_prefix: &str, tag: &str) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.add_tag(&id, tag, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.add_tag(&id, tag, now)?;
+        Ok(id)
+    })
 }
 
 pub fn remove_tag(
@@ -191,19 +193,19 @@ pub fn remove_tag(
     id_prefix: &str,
     tag: &str,
 ) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.remove_tag(&id, tag, now)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.remove_tag(&id, tag, now)?;
+        Ok(id)
+    })
 }
 
 pub fn delete(store: &LocalStore, id_prefix: &str) -> Result<NoteId> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, id_prefix)?;
-    doc.delete_note(&id)?;
-    store.save(&mut doc)?;
-    Ok(id)
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.delete_note(&id)?;
+        Ok(id)
+    })
 }
 
 /// A note's attachment references as `(attachment_id, filename)`.
@@ -219,21 +221,23 @@ pub fn detach(
     note_prefix: &str,
     att_prefix: &str,
 ) -> Result<String> {
-    let mut doc = store.load()?;
-    let id = resolve_id(&doc, note_prefix)?;
-    let note = doc.get_note(&id)?.ok_or_else(|| anyhow!("note vanished"))?;
-    let mut matches = note
-        .attachments
-        .into_iter()
-        .filter(|(a, _)| a.starts_with(att_prefix));
-    let att = match (matches.next(), matches.next()) {
-        (Some((a, _)), None) => a,
-        (None, _) => return Err(anyhow!("no attachment matches '{att_prefix}'")),
-        (Some(_), Some(_)) => return Err(anyhow!("attachment id '{att_prefix}' is ambiguous")),
-    };
-    doc.remove_attachment(&id, &att, now)?;
-    store.save(&mut doc)?;
-    Ok(att)
+    store.update(|doc| {
+        let id = resolve_id(doc, note_prefix)?;
+        let note = doc.get_note(&id)?.ok_or_else(|| anyhow!("note vanished"))?;
+        let mut matches = note
+            .attachments
+            .into_iter()
+            .filter(|(a, _)| a.starts_with(att_prefix));
+        let att = match (matches.next(), matches.next()) {
+            (Some((a, _)), None) => a,
+            (None, _) => return Err(anyhow!("no attachment matches '{att_prefix}'")),
+            (Some(_), Some(_)) => {
+                return Err(anyhow!("attachment id '{att_prefix}' is ambiguous"));
+            }
+        };
+        doc.remove_attachment(&id, &att, now)?;
+        Ok(att)
+    })
 }
 
 #[cfg(test)]

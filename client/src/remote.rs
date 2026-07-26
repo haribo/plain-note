@@ -119,11 +119,17 @@ pub async fn pair(cfg_path: &Path, blob_str: &str) -> Result<()> {
 pub async fn sync(cfg_path: &Path, store: &LocalStore) -> Result<u64> {
     let mut settings = Settings::load_from(cfg_path)?;
     let cfg = settings.to_sync_config()?;
+    // Sync a snapshot without holding the store lock across the network, then
+    // merge the result back under an exclusive lock. Concurrent local edits made
+    // during the sync are preserved by the CRDT merge, not clobbered.
     let mut doc = store.load()?;
     let new_seq = sync_once(&cfg, &mut doc, settings.last_seq)
         .await
         .context("sync failed")?;
-    store.save(&mut doc)?;
+    store.update(|disk| {
+        disk.merge(&mut doc)?;
+        Ok(())
+    })?;
     settings.last_seq = new_seq;
     settings.save_to(cfg_path)?;
     Ok(new_seq)
@@ -199,10 +205,11 @@ pub async fn attach(
         .error_for_status()
         .context("uploading attachment")?;
 
-    let mut doc = store.load()?;
-    let note = resolve_id(&doc, note_prefix)?;
-    doc.add_attachment(&note, &id, &filename, now)?;
-    store.save(&mut doc)?;
+    store.update(|doc| {
+        let note = resolve_id(doc, note_prefix)?;
+        doc.add_attachment(&note, &id, &filename, now)?;
+        Ok(())
+    })?;
     Ok(id)
 }
 
@@ -218,20 +225,21 @@ pub async fn fetch(
     let sc = settings.to_sync_config()?;
     let group = id16(&sc.group_id)?;
 
-    let doc = store.load()?;
-    let note = resolve_id(&doc, note_prefix)?;
-    let n = doc
-        .get_note(&note)?
-        .ok_or_else(|| anyhow!("note not found"))?;
-    let mut matches = n
-        .attachments
-        .into_iter()
-        .filter(|(id, _)| id.starts_with(att_prefix));
-    let (id, filename) = match (matches.next(), matches.next()) {
-        (Some(a), None) => a,
-        (None, _) => return Err(anyhow!("no attachment matches '{att_prefix}'")),
-        (Some(_), Some(_)) => return Err(anyhow!("attachment id '{att_prefix}' is ambiguous")),
-    };
+    let (id, filename) = store.read(|doc| {
+        let note = resolve_id(doc, note_prefix)?;
+        let n = doc
+            .get_note(&note)?
+            .ok_or_else(|| anyhow!("note not found"))?;
+        let mut matches = n
+            .attachments
+            .into_iter()
+            .filter(|(id, _)| id.starts_with(att_prefix));
+        match (matches.next(), matches.next()) {
+            (Some(a), None) => Ok(a),
+            (None, _) => Err(anyhow!("no attachment matches '{att_prefix}'")),
+            (Some(_), Some(_)) => Err(anyhow!("attachment id '{att_prefix}' is ambiguous")),
+        }
+    })?;
 
     let base = settings.relay_url.trim_end_matches('/');
     let envelope = reqwest::Client::new()
