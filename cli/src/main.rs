@@ -82,6 +82,17 @@ enum RemoteCmd {
     },
     /// Join an existing group from a pairing blob
     Pair { blob: String },
+    /// List the devices registered in this group (admin)
+    Devices {
+        #[arg(long)]
+        admin: String,
+    },
+    /// Revoke a device so it can no longer sync (admin)
+    Revoke {
+        device_id: String,
+        #[arg(long)]
+        admin: String,
+    },
 }
 
 #[tokio::main]
@@ -105,6 +116,8 @@ async fn main() -> Result<()> {
         Command::Remote { cmd } => match cmd {
             RemoteCmd::Init { relay, admin } => remote::init(&relay, &admin).await,
             RemoteCmd::Pair { blob } => remote::pair(&blob).await,
+            RemoteCmd::Devices { admin } => remote::devices(&admin).await,
+            RemoteCmd::Revoke { device_id, admin } => remote::revoke(&admin, &device_id).await,
         },
         Command::Sync => remote::sync().await,
     }

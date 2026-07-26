@@ -11,7 +11,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use note_protocol::{
-    ClientMsg, CreateGroupResponse, EnrollRequest, EnrollResponse, PROTOCOL_VERSION, ServerMsg,
+    ClientMsg, CreateGroupResponse, DeviceListResponse, EnrollRequest, EnrollResponse,
+    PROTOCOL_VERSION, ServerMsg,
 };
 use note_relay::build_app;
 use note_relay::state::AppState;
@@ -292,4 +293,90 @@ async fn admin_requires_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revocation_blocks_a_device() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let (group, code) = storage.create_group();
+    let sk = signing_key();
+    let (dev, _) = storage
+        .enroll(&code, sk.verifying_key().to_bytes().to_vec())
+        .unwrap();
+
+    let state = AppState::new(storage, Some("adm".to_string()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve_state = state.clone();
+    tokio::spawn(async move { note_relay::serve(listener, serve_state).await.unwrap() });
+    let app = build_app(state);
+    let url = format!("ws://{addr}/v1/sync");
+
+    // The device is listed and can authenticate.
+    assert_eq!(device_count(&app, &group).await, 1);
+    let ws = connect_auth(&url, &dev, &sk).await;
+    drop(ws);
+
+    // Revoke it.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/devices/{dev}"))
+                .header(header::AUTHORIZATION, "Bearer adm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(device_count(&app, &group).await, 0);
+
+    // It can no longer authenticate.
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(
+        &mut ws,
+        ClientMsg::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .await;
+    let challenge = match recv(&mut ws).await {
+        ServerMsg::Challenge { challenge } => B64.decode(challenge).unwrap(),
+        other => panic!("expected challenge, got {other:?}"),
+    };
+    send(
+        &mut ws,
+        ClientMsg::Auth {
+            device_id: dev,
+            signature: B64.encode(sk.sign(&challenge).to_bytes()),
+        },
+    )
+    .await;
+    match recv(&mut ws).await {
+        ServerMsg::Error { code, .. } => assert_eq!(code, "unauthorized"),
+        other => panic!("expected unauthorized, got {other:?}"),
+    }
+}
+
+async fn device_count(app: &axum::Router, group: &str) -> usize {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/devices?group_id={group}"))
+                .header(header::AUTHORIZATION, "Bearer adm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: DeviceListResponse = serde_json::from_slice(&body).unwrap();
+    list.devices.len()
 }

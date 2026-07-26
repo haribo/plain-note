@@ -49,6 +49,18 @@ pub struct CreateInviteResponse {
     pub invite_code: String,
 }
 
+/// A device as exposed to an admin — id only, never the public key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+}
+
+/// `GET /v1/devices?group_id=` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceListResponse {
+    pub devices: Vec<DeviceInfo>,
+}
+
 // --- Sync (WebSocket) ---
 
 /// Messages sent by a client to the relay over `/v1/sync`.

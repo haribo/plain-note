@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use note_core::{GroupKey, sync_once};
 use note_protocol::{
-    CreateGroupResponse, CreateInviteRequest, CreateInviteResponse, EnrollRequest, EnrollResponse,
+    CreateGroupResponse, CreateInviteRequest, CreateInviteResponse, DeviceListResponse,
+    EnrollRequest, EnrollResponse,
 };
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -121,6 +122,49 @@ pub async fn sync() -> Result<()> {
     settings.last_seq = new_seq;
     settings.save()?;
     println!("synced (seq {new_seq})");
+    Ok(())
+}
+
+/// List the devices registered in this group (admin).
+pub async fn devices(admin: &str) -> Result<()> {
+    let s = Settings::load()?;
+    let base = s.relay_url.trim_end_matches('/');
+    let resp: DeviceListResponse = reqwest::Client::new()
+        .get(format!("{base}/v1/devices"))
+        .query(&[("group_id", s.group_id.as_str())])
+        .bearer_auth(admin)
+        .send()
+        .await?
+        .error_for_status()
+        .context("listing devices")?
+        .json()
+        .await?;
+    if resp.devices.is_empty() {
+        println!("no devices");
+    }
+    for d in resp.devices {
+        let tag = if d.id == s.device_id {
+            "  (this device)"
+        } else {
+            ""
+        };
+        println!("{}{tag}", d.id);
+    }
+    Ok(())
+}
+
+/// Revoke a device so it can no longer sync (admin).
+pub async fn revoke(admin: &str, device_id: &str) -> Result<()> {
+    let s = Settings::load()?;
+    let base = s.relay_url.trim_end_matches('/');
+    reqwest::Client::new()
+        .delete(format!("{base}/v1/devices/{device_id}"))
+        .bearer_auth(admin)
+        .send()
+        .await?
+        .error_for_status()
+        .context("revoking device")?;
+    println!("revoked {device_id}");
     Ok(())
 }
 
