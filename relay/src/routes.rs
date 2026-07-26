@@ -3,17 +3,24 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use note_protocol::{
-    CreateGroupResponse, CreateInviteRequest, CreateInviteResponse, EnrollRequest, EnrollResponse,
+    CreateGroupResponse, CreateInviteRequest, CreateInviteResponse, DeviceInfo, DeviceListResponse,
+    EnrollRequest, EnrollResponse,
 };
+use serde::Deserialize;
 
 use crate::state::AppState;
 
 type ApiError = (StatusCode, String);
+
+#[derive(Deserialize)]
+pub struct GroupQuery {
+    group_id: String,
+}
 
 /// `POST /v1/enroll` — consume an invite and register a device's public key.
 pub async fn enroll(
@@ -58,6 +65,36 @@ pub async fn create_invite(
         .create_invite(&req.group_id)
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(Json(CreateInviteResponse { invite_code }))
+}
+
+/// `GET /v1/devices?group_id=` — list a group's devices (admin).
+pub async fn list_devices(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<GroupQuery>,
+) -> Result<Json<DeviceListResponse>, ApiError> {
+    check_admin(&state, &headers)?;
+    let devices = state
+        .storage
+        .list_devices(&q.group_id)
+        .into_iter()
+        .map(|d| DeviceInfo { id: d.id })
+        .collect();
+    Ok(Json(DeviceListResponse { devices }))
+}
+
+/// `DELETE /v1/devices/{id}` — revoke a device (admin).
+pub async fn revoke_device(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    check_admin(&state, &headers)?;
+    if state.storage.revoke_device(&device_id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "unknown device".to_string()))
+    }
 }
 
 fn check_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {

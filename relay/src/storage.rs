@@ -50,6 +50,11 @@ pub trait Storage: Send + Sync {
     fn enroll(&self, invite_code: &str, pubkey: Vec<u8>) -> Result<(String, String), StorageError>;
     /// Look up a device by id (for auth).
     fn device(&self, device_id: &str) -> Option<Device>;
+    /// Every device registered in a group.
+    fn list_devices(&self, group_id: &str) -> Vec<Device>;
+    /// Remove a device so it can no longer authenticate. Returns whether it
+    /// existed.
+    fn revoke_device(&self, device_id: &str) -> bool;
     /// Append an encrypted change, assigning the next per-group `seq`. Idempotent
     /// per `change_id`: a repeat returns the original `seq` and `is_new = false`,
     /// so a client retrying (or restarting) never duplicates the log.
@@ -133,6 +138,26 @@ impl Storage for InMemoryStorage {
 
     fn device(&self, device_id: &str) -> Option<Device> {
         self.inner.lock().unwrap().devices.get(device_id).cloned()
+    }
+
+    fn list_devices(&self, group_id: &str) -> Vec<Device> {
+        self.inner
+            .lock()
+            .unwrap()
+            .devices
+            .values()
+            .filter(|d| d.group_id == group_id)
+            .cloned()
+            .collect()
+    }
+
+    fn revoke_device(&self, device_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .devices
+            .remove(device_id)
+            .is_some()
     }
 
     fn append_change(
@@ -296,6 +321,30 @@ impl Storage for SqliteStorage {
         )
         .optional()
         .expect("query device")
+    }
+
+    fn list_devices(&self, group_id: &str) -> Vec<Device> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, group_id, pubkey FROM devices WHERE group_id = ?1")
+            .expect("prepare");
+        let rows = stmt
+            .query_map(params![group_id], |r| {
+                Ok(Device {
+                    id: r.get(0)?,
+                    group_id: r.get(1)?,
+                    pubkey: r.get(2)?,
+                })
+            })
+            .expect("query devices");
+        rows.map(|r| r.expect("row")).collect()
+    }
+
+    fn revoke_device(&self, device_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM devices WHERE id = ?1", params![device_id])
+            .expect("delete device")
+            > 0
     }
 
     fn append_change(
