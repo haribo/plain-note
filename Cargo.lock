@@ -1452,17 +1452,9 @@ name = "note-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
  "clap",
- "ed25519-dalek",
- "hex",
  "note-core",
- "note-protocol",
- "note-relay",
- "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
+ "plain-note-client",
  "tokio",
 ]
 
@@ -1634,6 +1626,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "plain-note-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "note-core",
+ "note-protocol",
+ "note-relay",
+ "rand 0.8.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "plain-note-gui"
 version = "0.1.0"
 dependencies = [
@@ -1641,6 +1651,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "note-core",
+ "plain-note-client",
 ]
 
 [[package]]

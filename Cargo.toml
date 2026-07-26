@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["protocol", "core", "cli", "relay", "gui"]
+members = ["protocol", "core", "client", "cli", "relay", "gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ authors = []
 note-core = { path = "core" }
 note-protocol = { path = "protocol" }
 note-relay = { path = "relay" }
+plain-note-client = { path = "client" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
