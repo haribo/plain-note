@@ -1085,6 +1085,7 @@ dependencies = [
  "ed25519-dalek",
  "note-core",
  "note-protocol",
+ "note-relay",
  "rand 0.8.7",
  "reqwest",
  "serde",
