@@ -15,6 +15,7 @@ use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use rand::rngs::OsRng;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Envelope format version, the first byte of every sealed blob.
@@ -149,6 +150,36 @@ pub fn open(key: &GroupKey, aad: Aad, envelope: &[u8]) -> Result<Vec<u8>, Crypto
         .map_err(|_| CryptoError::AuthenticationFailed)
 }
 
+/// Seal an attachment. Its AAD binds the group and `Kind::Attachment` only (a
+/// downloader has no uploader identity to reconstruct), so any group member can
+/// open it with the shared key.
+pub fn seal_attachment(key: &GroupKey, group_id: [u8; ID_LEN], plaintext: &[u8]) -> Vec<u8> {
+    seal(key, attachment_aad(group_id), plaintext)
+}
+
+/// Open an attachment sealed by [`seal_attachment`].
+pub fn open_attachment(
+    key: &GroupKey,
+    group_id: [u8; ID_LEN],
+    envelope: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    open(key, attachment_aad(group_id), envelope)
+}
+
+/// Content address of an attachment envelope: `SHA-256` of the ciphertext,
+/// hex-encoded. Also what the relay verifies the upload path against.
+pub fn attachment_id(envelope: &[u8]) -> String {
+    hex::encode(Sha256::digest(envelope))
+}
+
+fn attachment_aad(group_id: [u8; ID_LEN]) -> Aad {
+    Aad {
+        group_id,
+        device_id: [0u8; ID_LEN],
+        kind: Kind::Attachment,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +269,20 @@ mod tests {
             open(&key, aad(), &env).unwrap_err(),
             CryptoError::UnsupportedVersion(0xfe)
         );
+    }
+
+    #[test]
+    fn attachment_round_trip_and_id() {
+        let key = GroupKey::generate();
+        let group = [7u8; ID_LEN];
+        let data = b"an image or a pdf";
+        let env = seal_attachment(&key, group, data);
+        assert_eq!(open_attachment(&key, group, &env).unwrap(), data);
+        // id is the hash of the envelope, stable for a given envelope.
+        assert_eq!(attachment_id(&env).len(), 64);
+        assert_eq!(attachment_id(&env), attachment_id(&env));
+        // wrong group fails to open.
+        assert!(open_attachment(&key, [8u8; ID_LEN], &env).is_err());
     }
 
     #[test]
