@@ -1,0 +1,24 @@
+[package]
+name = "plain-note-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "plain_note_client"
+
+[dependencies]
+note-core.workspace = true
+note-protocol.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+note-relay.workspace = true

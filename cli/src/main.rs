@@ -3,17 +3,12 @@
 //! Parses arguments, wires the clock/editor/paths, and prints. All note logic
 //! lives in `commands` (pure, testable) and all networked logic in `remote`.
 
-mod commands;
-mod config;
-mod remote;
-mod store;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-
-use crate::store::LocalStore;
+use plain_note_client::store::LocalStore;
+use plain_note_client::{commands, config, remote, store};
 
 const SHORT_ID: usize = 8;
 

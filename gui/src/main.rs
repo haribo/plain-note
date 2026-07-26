@@ -5,16 +5,13 @@
 //! follow-ups (the latter needs a shared client library so config/sync are not
 //! duplicated).
 
-mod store;
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
 use note_core::{NoteId, NoteStore};
-
-use crate::store::LocalStore;
+use plain_note_client::store::{self, LocalStore};
 
 const APP_ID: &str = "dev.plainnote.PlainNote";
 
