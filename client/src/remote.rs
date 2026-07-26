@@ -5,6 +5,7 @@
 //! They return data; `main` owns the printing.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::SigningKey;
@@ -133,6 +134,68 @@ pub async fn sync(cfg_path: &Path, store: &LocalStore) -> Result<u64> {
     settings.last_seq = new_seq;
     settings.save_to(cfg_path)?;
     Ok(new_seq)
+}
+
+/// Continuously sync: an initial sync, then re-sync whenever the local store
+/// file changes (filesystem watch) and on a periodic tick (to pull remote
+/// changes). Runs until the process is interrupted.
+pub async fn watch(cfg_path: &Path, store: &LocalStore) -> Result<()> {
+    let store_path = store.path().to_path_buf();
+    let watch_dir = store_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    run_sync(cfg_path, store).await;
+    let mut last_write = store_mtime(&store_path);
+
+    use notify::Watcher as _;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    })
+    .context("creating file watcher")?;
+    watcher
+        .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
+        .with_context(|| format!("watching {}", watch_dir.display()))?;
+
+    println!(
+        "watching {} for changes (Ctrl-C to stop)",
+        store_path.display()
+    );
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    tick.tick().await; // consume the immediate first tick
+
+    loop {
+        let trigger = tokio::select! {
+            _ = tick.tick() => "poll",
+            Some(_) = rx.recv() => {
+                // Coalesce a burst of events, then ignore our own save.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                while rx.try_recv().is_ok() {}
+                if store_mtime(&store_path) == last_write {
+                    continue;
+                }
+                "local edit"
+            }
+        };
+        run_sync(cfg_path, store).await;
+        last_write = store_mtime(&store_path);
+        let _ = trigger;
+    }
+}
+
+async fn run_sync(cfg_path: &Path, store: &LocalStore) {
+    match sync(cfg_path, store).await {
+        Ok(seq) => println!("synced (seq {seq})"),
+        Err(e) => eprintln!("sync error: {e:#}"),
+    }
+}
+
+fn store_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// List the group's devices as `(device_id, is_this_device)` (admin).
@@ -393,6 +456,50 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), contents);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn watch_pushes_local_edits() {
+        let base = spawn_relay("adm").await;
+        let dir = temp_dir();
+        let cfg_a = dir.join("a.json");
+        let cfg_b = dir.join("b.json");
+        let store_a = LocalStore::new(dir.join("a.automerge"));
+        let store_b = LocalStore::new(dir.join("b.automerge"));
+
+        let blob = init(&cfg_a, &base, "adm").await.unwrap();
+        pair(&cfg_b, &blob).await.unwrap();
+
+        // Run the watch loop on A in the background.
+        let cfg_a2 = cfg_a.clone();
+        let store_a2 = LocalStore::new(dir.join("a.automerge"));
+        let handle = tokio::spawn(async move {
+            let _ = watch(&cfg_a2, &store_a2).await;
+        });
+        // Let the watcher start and do its initial sync.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // An external edit to A's store — the watcher should push it.
+        commands::new_note(&store_a, 1, Some("Watched"), None, None).unwrap();
+
+        // Poll B until it sees the note (file event -> sync within ~1s).
+        let mut seen = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            sync(&cfg_b, &store_b).await.unwrap();
+            if commands::list(&store_b, None, None)
+                .unwrap()
+                .iter()
+                .any(|n| n.title == "Watched")
+            {
+                seen = true;
+                break;
+            }
+        }
+        handle.abort();
+        assert!(seen, "watch did not push the local edit within the timeout");
 
         let _ = std::fs::remove_dir_all(dir);
     }

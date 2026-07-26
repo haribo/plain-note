@@ -46,6 +46,11 @@ impl LocalStore {
         Self::new(default_store_path())
     }
 
+    /// The store file path (for watchers).
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Load the store under a shared lock, or start empty if it does not exist.
     pub fn load(&self) -> Result<NoteStore> {
         let _lock = self.lock(false)?;
