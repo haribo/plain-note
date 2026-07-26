@@ -8,6 +8,8 @@ mod config;
 mod remote;
 mod store;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -70,6 +72,19 @@ enum Command {
     Search { query: String },
     /// Delete a note
     Rm { id: String },
+    /// Attach a file to a note (encrypt + upload to the relay)
+    Attach { id: String, file: PathBuf },
+    /// List a note's attachments
+    Attachments { id: String },
+    /// Download and decrypt a note's attachment
+    Fetch {
+        id: String,
+        attachment: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Remove an attachment reference from a note
+    Detach { id: String, attachment: String },
     /// Manage folders
     Folder {
         #[command(subcommand)]
@@ -195,6 +210,31 @@ async fn main() -> Result<()> {
         Command::Rm { id } => {
             let id = commands::delete(&store, &id)?;
             println!("deleted {}", short(id.as_str()));
+        }
+        Command::Attach { id, file } => {
+            let aid = remote::attach(&config::config_path(), &store, now, &id, &file).await?;
+            println!("attached {}", short(&aid));
+        }
+        Command::Attachments { id } => {
+            let atts = commands::attachments(&store, &id)?;
+            if atts.is_empty() {
+                eprintln!("no attachments");
+            }
+            for (aid, name) in atts {
+                println!("{}  {name}", short(&aid));
+            }
+        }
+        Command::Fetch {
+            id,
+            attachment,
+            out,
+        } => {
+            let path = remote::fetch(&config::config_path(), &store, &id, &attachment, out).await?;
+            println!("wrote {}", path.display());
+        }
+        Command::Detach { id, attachment } => {
+            let aid = commands::detach(&store, now, &id, &attachment)?;
+            println!("detached {}", short(&aid));
         }
         Command::Folder { cmd } => run_folder(cmd, &store, now)?,
         Command::Remote { cmd } => run_remote(cmd).await?,
