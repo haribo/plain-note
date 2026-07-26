@@ -27,6 +27,8 @@ pub struct EnrollRequest {
 pub struct EnrollResponse {
     pub device_id: String,
     pub group_id: String,
+    /// Bearer token for authenticated HTTP calls (attachment upload/download).
+    pub device_token: String,
 }
 
 // --- Admin (HTTP, token-gated) ---
