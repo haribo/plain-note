@@ -56,8 +56,14 @@ pn rm <id>
 Run a relay (`pn-relay`), configured via environment:
 
 ```sh
-PN_RELAY_BIND=127.0.0.1:8787 PN_RELAY_ADMIN_TOKEN=<token> pn-relay
+PN_RELAY_BIND=127.0.0.1:8787 \
+PN_RELAY_ADMIN_TOKEN=<token> \
+PN_RELAY_DB=/var/lib/plain-note/relay.db \
+pn-relay
 ```
+
+`PN_RELAY_DB` selects durable SQLite storage; unset falls back to in-memory
+(data lost on restart).
 
 Then, on the first device, create a group and enroll; this prints a pairing blob
 (the QR payload stand-in) carrying the shared E2E key:
