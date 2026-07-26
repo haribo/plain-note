@@ -121,14 +121,14 @@ A GTK4 + libadwaita desktop client shares the same store as `pn`:
 cargo run -p plain-note-gui
 ```
 
-Covers local editing: folder tree + note list with search in the sidebar, and a
-Markdown editor with tags and auto-save. Live auto-sync in the GUI is in
-progress. Needs GTK 4 and libadwaita installed.
+Folder tree + note list with search in the sidebar, a Markdown editor with tags
+and auto-save, and **live auto-sync** (background, when the device is enrolled).
+Needs GTK 4 and libadwaita installed.
 
 ## Roadmap
 
 1. **Core + CLI + relay** — encrypted sync validated end to end. ✔
-2. **Linux GUI** (GTK4 + libadwaita) — in progress.
+2. **Linux GUI** (GTK4 + libadwaita) — notes, folders, tags, search, auto-sync. ✔
 3. **Android** (Kotlin/Compose via UniFFI).
 
 ## License
