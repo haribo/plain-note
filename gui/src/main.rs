@@ -1,16 +1,15 @@
 //! Plain Note — GTK4 + libadwaita desktop client.
 //!
-//! v1: local editing (note list + Markdown editor + auto-save) over the same
-//! on-disk store as `pn`. Folder tree, tags UI, search, and live auto-sync are
-//! follow-ups (the latter needs a shared client library so config/sync are not
-//! duplicated).
+//! Local editing over the same on-disk store as `pn`: a folder tree + note list
+//! sidebar with search, and a Markdown editor with tags. Live auto-sync is a
+//! follow-up. Reuses `plain-note-client` for persistence.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use note_core::{NoteId, NoteStore};
+use note_core::{FolderId, NoteId, NoteStore, ROOT_FOLDER};
 use plain_note_client::store::{self, LocalStore};
 
 const APP_ID: &str = "dev.plainnote.PlainNote";
@@ -18,8 +17,11 @@ const APP_ID: &str = "dev.plainnote.PlainNote";
 struct State {
     store: LocalStore,
     doc: NoteStore,
-    ids: Vec<NoteId>,
+    note_ids: Vec<NoteId>,
+    folder_ids: Vec<Option<String>>, // parallel to folder rows; None = "all notes"
     current: Option<NoteId>,
+    filter: Option<String>, // folder id filter; None = all
+    query: String,
     loading: bool,
 }
 
@@ -33,9 +35,11 @@ impl State {
 
 #[derive(Clone)]
 struct Ui {
-    list: gtk::ListBox,
+    folder_list: gtk::ListBox,
+    note_list: gtk::ListBox,
     title: gtk::Entry,
     buffer: gtk::TextBuffer,
+    tags_box: gtk::Box,
     subtitle: adw::WindowTitle,
 }
 
@@ -56,34 +60,62 @@ fn build_ui(app: &adw::Application) {
     let state = Rc::new(RefCell::new(State {
         store,
         doc,
-        ids: Vec::new(),
+        note_ids: Vec::new(),
+        folder_ids: Vec::new(),
         current: None,
+        filter: None,
+        query: String::new(),
         loading: false,
     }));
 
-    // --- Sidebar: header + note list ---
+    // --- Sidebar ---
     let new_btn = gtk::Button::from_icon_name("list-add-symbolic");
     new_btn.add_css_class("flat");
     new_btn.set_tooltip_text(Some("Nouvelle note"));
 
     let sidebar_header = adw::HeaderBar::new();
-    sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("Notes", "")));
+    sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("Plain Note", "")));
     sidebar_header.pack_start(&new_btn);
 
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::Single);
-    list.add_css_class("navigation-sidebar");
-    let list_scroll = gtk::ScrolledWindow::builder()
-        .child(&list)
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Rechercher"));
+    search.set_margin_top(8);
+    search.set_margin_start(8);
+    search.set_margin_end(8);
+
+    let folder_list = gtk::ListBox::new();
+    folder_list.set_selection_mode(gtk::SelectionMode::Single);
+    folder_list.add_css_class("navigation-sidebar");
+
+    let new_folder = gtk::Entry::builder()
+        .placeholder_text("Nouveau dossier…")
+        .build();
+    new_folder.set_margin_start(8);
+    new_folder.set_margin_end(8);
+    new_folder.set_margin_bottom(4);
+
+    let note_list = gtk::ListBox::new();
+    note_list.set_selection_mode(gtk::SelectionMode::Single);
+    note_list.add_css_class("navigation-sidebar");
+    let note_scroll = gtk::ScrolledWindow::builder()
+        .child(&note_list)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
+    let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    sidebar_box.append(&search);
+    sidebar_box.append(&section_label("Dossiers"));
+    sidebar_box.append(&folder_list);
+    sidebar_box.append(&new_folder);
+    sidebar_box.append(&section_label("Notes"));
+    sidebar_box.append(&note_scroll);
+
     let sidebar = adw::ToolbarView::new();
     sidebar.add_top_bar(&sidebar_header);
-    sidebar.set_content(Some(&list_scroll));
+    sidebar.set_content(Some(&sidebar_box));
 
-    // --- Content: header + editor ---
+    // --- Editor ---
     let subtitle = adw::WindowTitle::new("Plain Note", "");
     let content_header = adw::HeaderBar::new();
     content_header.set_title_widget(Some(&subtitle));
@@ -93,6 +125,23 @@ fn build_ui(app: &adw::Application) {
     title.set_margin_top(14);
     title.set_margin_start(18);
     title.set_margin_end(18);
+
+    let tags_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let tag_entry = gtk::Entry::builder()
+        .placeholder_text("+ tag")
+        .max_width_chars(10)
+        .build();
+    tag_entry.add_css_class("flat");
+    let tags_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    tags_row.set_margin_start(18);
+    tags_row.set_margin_end(18);
+    tags_row.set_margin_top(8);
+    tags_row.append(&tags_box);
+    tags_row.append(&tag_entry);
+    let tags_scroll = gtk::ScrolledWindow::builder()
+        .child(&tags_row)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .build();
 
     let text_view = gtk::TextView::new();
     text_view.set_monospace(true);
@@ -109,13 +158,13 @@ fn build_ui(app: &adw::Application) {
 
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor.append(&title);
+    editor.append(&tags_scroll);
     editor.append(&text_scroll);
 
     let content = adw::ToolbarView::new();
     content.add_top_bar(&content_header);
     content.set_content(Some(&editor));
 
-    // --- Split view ---
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar));
     split.set_content(Some(&content));
@@ -123,26 +172,53 @@ fn build_ui(app: &adw::Application) {
     split.set_max_sidebar_width(360.0);
 
     let ui = Ui {
-        list: list.clone(),
+        folder_list: folder_list.clone(),
+        note_list: note_list.clone(),
         title: title.clone(),
         buffer: buffer.clone(),
+        tags_box,
         subtitle,
     };
 
-    rebuild_list(&ui, &state);
+    rebuild_folders(&ui, &state);
+    rebuild_notes(&ui, &state);
 
-    // Row selection -> load note into the editor.
+    // Folder selection -> filter.
     {
         let ui = ui.clone();
         let state = state.clone();
-        list.connect_row_selected(move |_, row| {
+        folder_list.connect_row_selected(move |_, row| {
+            if let Some(row) = row {
+                let idx = row.index() as usize;
+                let filter = state.borrow().folder_ids.get(idx).cloned().flatten();
+                state.borrow_mut().filter = filter;
+                rebuild_notes(&ui, &state);
+            }
+        });
+    }
+
+    // Note selection -> load into editor.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        note_list.connect_row_selected(move |_, row| {
             if let Some(row) = row {
                 show_note(&ui, &state, row.index());
             }
         });
     }
 
-    // New note.
+    // Search -> refilter notes.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        search.connect_search_changed(move |e| {
+            state.borrow_mut().query = e.text().to_string();
+            rebuild_notes(&ui, &state);
+        });
+    }
+
+    // New note (in the selected folder, if any).
     {
         let ui = ui.clone();
         let state = state.clone();
@@ -150,24 +226,78 @@ fn build_ui(app: &adw::Application) {
             let now = store::now_millis();
             let created = {
                 let mut st = state.borrow_mut();
-                let id = st.doc.create_note(now);
-                if id.is_ok() {
-                    st.persist();
+                match st.doc.create_note(now) {
+                    Ok(id) => {
+                        if let Some(f) = st.filter.clone() {
+                            let _ = st.doc.move_note(&id, &f, now);
+                        }
+                        st.persist();
+                        Some(id)
+                    }
+                    Err(_) => None,
                 }
-                id.ok()
             };
             if created.is_some() {
-                rebuild_list(&ui, &state);
-                if let Some(row) = ui.list.row_at_index(0) {
-                    ui.list.select_row(Some(&row));
+                rebuild_notes(&ui, &state);
+                if let Some(row) = ui.note_list.row_at_index(0) {
+                    ui.note_list.select_row(Some(&row));
                 }
                 ui.title.grab_focus();
             }
         });
     }
 
+    // New folder.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        new_folder.connect_activate(move |entry| {
+            let name = entry.text().to_string();
+            if name.trim().is_empty() {
+                return;
+            }
+            {
+                let mut st = state.borrow_mut();
+                if st
+                    .doc
+                    .create_folder(&name, ROOT_FOLDER, store::now_millis())
+                    .is_ok()
+                {
+                    st.persist();
+                }
+            }
+            entry.set_text("");
+            rebuild_folders(&ui, &state);
+        });
+    }
+
+    // Add a tag.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        tag_entry.connect_activate(move |entry| {
+            let tag = entry.text().to_string();
+            let tag = tag.trim().trim_start_matches('#');
+            let current = state.borrow().current.clone();
+            if tag.is_empty() {
+                return;
+            }
+            if let Some(id) = current {
+                {
+                    let mut st = state.borrow_mut();
+                    let _ = st.doc.add_tag(&id, tag, store::now_millis());
+                    st.persist();
+                }
+                entry.set_text("");
+                rebuild_tags(&ui, &state, &id);
+                rebuild_notes(&ui, &state);
+            }
+        });
+    }
+
     // Title edits -> save.
     {
+        let ui = ui.clone();
         let state = state.clone();
         title.connect_changed(move |entry| {
             let (loading, current) = {
@@ -178,10 +308,12 @@ fn build_ui(app: &adw::Application) {
                 return;
             }
             if let Some(id) = current {
-                let text = entry.text().to_string();
-                let mut st = state.borrow_mut();
-                let _ = st.doc.set_title(&id, &text, store::now_millis());
-                st.persist();
+                {
+                    let mut st = state.borrow_mut();
+                    let _ = st.doc.set_title(&id, &entry.text(), store::now_millis());
+                    st.persist();
+                }
+                refresh_note_row(&ui, &state, &id);
             }
         });
     }
@@ -219,17 +351,101 @@ fn build_ui(app: &adw::Application) {
     window.present();
 }
 
-/// Rebuild the sidebar list from the store, newest first.
-fn rebuild_list(ui: &Ui, state: &Rc<RefCell<State>>) {
-    while let Some(child) = ui.list.first_child() {
-        ui.list.remove(&child);
+fn section_label(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.add_css_class("dim-label");
+    l.add_css_class("caption-heading");
+    l.set_halign(gtk::Align::Start);
+    l.set_margin_start(12);
+    l.set_margin_top(6);
+    l
+}
+
+fn rebuild_folders(ui: &Ui, state: &Rc<RefCell<State>>) {
+    while let Some(child) = ui.folder_list.first_child() {
+        ui.folder_list.remove(&child);
     }
+    let mut folder_ids: Vec<Option<String>> = vec![None];
+
+    let all = adw::ActionRow::builder().title("Toutes les notes").build();
+    ui.folder_list.append(&all);
+
+    let folders = {
+        let st = state.borrow();
+        let mut fs: Vec<(String, String)> = st
+            .doc
+            .list_folders()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| {
+                let path = st.doc.folder_path(f.id.as_str()).unwrap_or_default();
+                (f.id.as_str().to_string(), path)
+            })
+            .collect();
+        fs.sort_by(|a, b| a.1.cmp(&b.1));
+        fs
+    };
+
+    for (id, path) in folders {
+        let row = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&path).as_str())
+            .build();
+        let del = gtk::Button::from_icon_name("user-trash-symbolic");
+        del.add_css_class("flat");
+        del.set_valign(gtk::Align::Center);
+        del.set_tooltip_text(Some("Supprimer le dossier"));
+        {
+            let ui = ui.clone();
+            let state = state.clone();
+            let fid = id.clone();
+            del.connect_clicked(move |_| {
+                {
+                    let mut st = state.borrow_mut();
+                    if st
+                        .doc
+                        .delete_folder(&FolderId::from(fid.clone()), store::now_millis())
+                        .is_ok()
+                    {
+                        if st.filter.as_deref() == Some(fid.as_str()) {
+                            st.filter = None;
+                        }
+                        st.persist();
+                    }
+                }
+                rebuild_folders(&ui, &state);
+                rebuild_notes(&ui, &state);
+            });
+        }
+        row.add_suffix(&del);
+        ui.folder_list.append(&row);
+        folder_ids.push(Some(id));
+    }
+
+    state.borrow_mut().folder_ids = folder_ids;
+}
+
+fn rebuild_notes(ui: &Ui, state: &Rc<RefCell<State>>) {
+    while let Some(child) = ui.note_list.first_child() {
+        ui.note_list.remove(&child);
+    }
+    let (query, filter) = {
+        let st = state.borrow();
+        (st.query.clone(), st.filter.clone())
+    };
     let mut notes = {
         let st = state.borrow();
-        st.doc.list().unwrap_or_default()
-    };
+        if query.trim().is_empty() {
+            st.doc.list()
+        } else {
+            st.doc.search(&query)
+        }
+    }
+    .unwrap_or_default();
+    if let Some(f) = &filter {
+        notes.retain(|n| &n.folder == f);
+    }
     notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
-    state.borrow_mut().ids = notes.iter().map(|n| n.id.clone()).collect();
+    state.borrow_mut().note_ids = notes.iter().map(|n| n.id.clone()).collect();
 
     for n in &notes {
         let title = if n.title.is_empty() {
@@ -246,15 +462,27 @@ fn rebuild_list(ui: &Ui, state: &Rc<RefCell<State>>) {
             .title(glib::markup_escape_text(&title).as_str())
             .subtitle(subtitle.as_str())
             .build();
-        ui.list.append(&row);
+        ui.note_list.append(&row);
     }
 }
 
-/// Load the note at `idx` into the editor.
+fn refresh_note_row(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
+    // Cheapest correct approach: rebuild the list, keeping the selection.
+    let idx = state.borrow().note_ids.iter().position(|n| n == id);
+    rebuild_notes(ui, state);
+    if let Some(idx) = idx
+        && let Some(row) = ui.note_list.row_at_index(idx as i32)
+    {
+        state.borrow_mut().loading = true;
+        ui.note_list.select_row(Some(&row));
+        state.borrow_mut().loading = false;
+    }
+}
+
 fn show_note(ui: &Ui, state: &Rc<RefCell<State>>, idx: i32) {
     let note = {
         let st = state.borrow();
-        st.ids
+        st.note_ids
             .get(idx as usize)
             .cloned()
             .and_then(|id| st.doc.get_note(&id).ok().flatten())
@@ -269,20 +497,60 @@ fn show_note(ui: &Ui, state: &Rc<RefCell<State>>, idx: i32) {
     }
     ui.title.set_text(&note.title);
     ui.buffer.set_text(&note.text);
-    let heading = if note.title.is_empty() {
+    let path = {
+        let st = state.borrow();
+        st.doc.folder_path(&note.folder).unwrap_or_default()
+    };
+    ui.subtitle.set_title(if note.title.is_empty() {
         "(sans titre)"
     } else {
         &note.title
-    };
-    ui.subtitle.set_title(heading);
+    });
+    ui.subtitle.set_subtitle(&path);
     state.borrow_mut().loading = false;
+    rebuild_tags(ui, state, &note.id);
+}
+
+fn rebuild_tags(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
+    while let Some(child) = ui.tags_box.first_child() {
+        ui.tags_box.remove(&child);
+    }
+    let tags = {
+        let st = state.borrow();
+        st.doc
+            .get_note(id)
+            .ok()
+            .flatten()
+            .map(|n| n.tags)
+            .unwrap_or_default()
+    };
+    for tag in tags {
+        let chip = gtk::Button::with_label(&format!("#{tag}  ✕"));
+        chip.add_css_class("flat");
+        chip.add_css_class("pn-chip");
+        let ui2 = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let tag_name = tag.clone();
+        chip.connect_clicked(move |_| {
+            {
+                let mut st = state.borrow_mut();
+                let _ = st.doc.remove_tag(&id, &tag_name, store::now_millis());
+                st.persist();
+            }
+            rebuild_tags(&ui2, &state, &id);
+            rebuild_notes(&ui2, &state);
+        });
+        ui.tags_box.append(&chip);
+    }
 }
 
 fn install_css() {
     let css = gtk::CssProvider::new();
     css.load_from_data(
         ".pn-title { font-size: 1.4rem; font-weight: 800; } \
-         .pn-title text { font-weight: 800; }",
+         .pn-title text { font-weight: 800; } \
+         .pn-chip { padding: 2px 8px; min-height: 0; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
