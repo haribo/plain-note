@@ -121,9 +121,9 @@ A GTK4 + libadwaita desktop client shares the same store as `pn`:
 cargo run -p plain-note-gui
 ```
 
-v1 covers local editing (note list + Markdown editor + auto-save). Folder tree,
-tags, search, and live auto-sync in the GUI are in progress. Needs GTK 4 and
-libadwaita installed.
+Covers local editing: folder tree + note list with search in the sidebar, and a
+Markdown editor with tags and auto-save. Live auto-sync in the GUI is in
+progress. Needs GTK 4 and libadwaita installed.
 
 ## Roadmap
 
