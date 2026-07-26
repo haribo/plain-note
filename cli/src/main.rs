@@ -10,7 +10,6 @@ mod store;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use note_core::NoteMeta;
 
 use crate::store::LocalStore;
 
@@ -34,6 +33,7 @@ enum Command {
     New {
         #[arg(long)]
         title: Option<String>,
+        /// Folder id to place the note in (see `pn folder ls`)
         #[arg(long)]
         folder: Option<String>,
         #[arg(long)]
@@ -42,6 +42,7 @@ enum Command {
     /// List notes, most recently updated first
     #[command(visible_alias = "ls")]
     List {
+        /// Filter by folder id
         #[arg(long)]
         folder: Option<String>,
         #[arg(long)]
@@ -54,8 +55,12 @@ enum Command {
     Edit { id: String },
     /// Set a note's title
     SetTitle { id: String, title: String },
-    /// Set a note's folder
-    SetFolder { id: String, folder: String },
+    /// Move a note into a folder (omit --to for the top level)
+    Mv {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Add a tag to a note
     Tag { id: String, tag: String },
     /// Remove a tag from a note
@@ -65,6 +70,11 @@ enum Command {
     Search { query: String },
     /// Delete a note
     Rm { id: String },
+    /// Manage folders
+    Folder {
+        #[command(subcommand)]
+        cmd: FolderCmd,
+    },
     /// Relay enrollment (init a group / pair a device)
     Remote {
         #[command(subcommand)]
@@ -72,6 +82,30 @@ enum Command {
     },
     /// Sync with the relay (push local, pull remote)
     Sync,
+}
+
+#[derive(Subcommand)]
+enum FolderCmd {
+    /// Create a folder (omit --parent for the top level)
+    #[command(visible_alias = "n")]
+    New {
+        name: String,
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// List folders as a tree
+    #[command(visible_alias = "ls")]
+    List,
+    /// Rename a folder
+    Rename { id: String, name: String },
+    /// Move a folder under another (omit --to for the top level)
+    Mv {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Delete a folder (its notes and subfolders move to its parent)
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -125,10 +159,12 @@ async fn main() -> Result<()> {
             println!("{}", short(id.as_str()));
         }
         Command::List { folder, tag } => {
-            print_table(&commands::list(&store, folder.as_deref(), tag.as_deref())?);
+            let notes = commands::list(&store, folder.as_deref(), tag.as_deref())?;
+            print_notes(&store, &notes)?;
         }
         Command::Search { query } => {
-            print_table(&commands::search(&store, &query)?);
+            let notes = commands::search(&store, &query)?;
+            print_notes(&store, &notes)?;
         }
         Command::Show { id } => {
             let note = commands::get(&store, &id)?;
@@ -147,8 +183,8 @@ async fn main() -> Result<()> {
         Command::SetTitle { id, title } => {
             commands::set_title(&store, now, &id, &title)?;
         }
-        Command::SetFolder { id, folder } => {
-            commands::set_folder(&store, now, &id, &folder)?;
+        Command::Mv { id, to } => {
+            commands::move_note(&store, now, &id, to.as_deref())?;
         }
         Command::Tag { id, tag } => {
             commands::add_tag(&store, now, &id, &tag)?;
@@ -160,10 +196,40 @@ async fn main() -> Result<()> {
             let id = commands::delete(&store, &id)?;
             println!("deleted {}", short(id.as_str()));
         }
+        Command::Folder { cmd } => run_folder(cmd, &store, now)?,
         Command::Remote { cmd } => run_remote(cmd).await?,
         Command::Sync => {
             let seq = remote::sync(&config::config_path(), &store).await?;
             println!("synced (seq {seq})");
+        }
+    }
+    Ok(())
+}
+
+fn run_folder(cmd: FolderCmd, store: &LocalStore, now: note_core::Timestamp) -> Result<()> {
+    match cmd {
+        FolderCmd::New { name, parent } => {
+            let id = commands::create_folder(store, now, &name, parent.as_deref())?;
+            println!("{}", short(id.as_str()));
+        }
+        FolderCmd::List => {
+            let rows = commands::list_folders(store)?;
+            if rows.is_empty() {
+                eprintln!("no folders");
+            }
+            for r in rows {
+                println!("{}  {}", short(r.meta.id.as_str()), r.path);
+            }
+        }
+        FolderCmd::Rename { id, name } => {
+            commands::rename_folder(store, &id, &name)?;
+        }
+        FolderCmd::Mv { id, to } => {
+            commands::move_folder(store, &id, to.as_deref())?;
+        }
+        FolderCmd::Rm { id } => {
+            let id = commands::delete_folder(store, now, &id)?;
+            println!("deleted folder {}", short(id.as_str()));
         }
     }
     Ok(())
@@ -203,10 +269,10 @@ fn short(id: &str) -> &str {
     &id[..SHORT_ID.min(id.len())]
 }
 
-fn print_table(notes: &[NoteMeta]) {
+fn print_notes(store: &LocalStore, notes: &[note_core::NoteMeta]) -> Result<()> {
     if notes.is_empty() {
         eprintln!("no notes");
-        return;
+        return Ok(());
     }
     for n in notes {
         let title = if n.title.is_empty() {
@@ -217,7 +283,7 @@ fn print_table(notes: &[NoteMeta]) {
         let folder = if n.folder.is_empty() {
             String::new()
         } else {
-            format!("  [{}]", n.folder)
+            format!("  [{}]", commands::folder_path(store, &n.folder)?)
         };
         let tags = if n.tags.is_empty() {
             String::new()
@@ -226,4 +292,5 @@ fn print_table(notes: &[NoteMeta]) {
         };
         println!("{}  {title}{folder}{tags}", short(n.id.as_str()));
     }
+    Ok(())
 }

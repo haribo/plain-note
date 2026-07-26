@@ -6,20 +6,24 @@
 //! that is the reason the model is an Automerge document rather than plain files.
 //!
 //! Document shape (map keys are stable identifiers, never shown to the user).
-//! Notes live directly at ROOT — there is no shared container object, so two
-//! devices that each start from an empty store never create conflicting
-//! containers; an empty store is simply an empty document.
+//! Notes and folders both live directly at ROOT — there is no shared container
+//! object, so two devices that each start from an empty store never create
+//! conflicting containers; an empty store is simply an empty document. Folder
+//! keys are prefixed `f:`; note ids are 32-hex and never contain `:`.
 //!
 //! ```text
 //! ROOT
 //!   <note_id>: Map
 //!     title:       str
-//!     folder:      str
-//!     text:        Text      (Markdown, char-level CRDT merge)
+//!     folder:      str        (folder id, or "" for the top level)
+//!     text:        Text       (Markdown, char-level CRDT merge)
 //!     tags:        Map<tag, true>           (set semantics)
 //!     attachments: Map<attachment_id, true> (set semantics)
 //!     created:     int (unix millis)
 //!     updated:     int (unix millis)
+//!   f:<folder_id>: Map
+//!     name:        str
+//!     parent:      str        (parent folder id, or "" for the top level)
 //! ```
 //!
 //! Timestamps are passed in by the caller ([`Timestamp`]) so the model stays
@@ -31,6 +35,7 @@ use automerge::{
 };
 use rand::RngCore;
 use rand::rngs::OsRng;
+use std::collections::{HashMap, HashSet};
 
 /// Unix milliseconds. Supplied by the caller; the model never reads a clock.
 pub type Timestamp = i64;
@@ -42,6 +47,15 @@ const TAGS: &str = "tags";
 const ATTACHMENTS: &str = "attachments";
 const CREATED: &str = "created";
 const UPDATED: &str = "updated";
+const NAME: &str = "name";
+const PARENT: &str = "parent";
+
+/// ROOT-key prefix marking a folder entry. Notes are 32-hex ids and never
+/// contain `:`, so the two never collide.
+const FOLDER_PREFIX: &str = "f:";
+
+/// The sentinel parent/folder id meaning "top level" (no folder).
+pub const ROOT_FOLDER: &str = "";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -49,6 +63,10 @@ pub enum ModelError {
     Automerge(#[from] AutomergeError),
     #[error("note not found: {0}")]
     NotFound(String),
+    #[error("folder not found: {0}")]
+    FolderNotFound(String),
+    #[error("invalid folder move: {0}")]
+    InvalidMove(&'static str),
     #[error("malformed document: {0}")]
     Malformed(&'static str),
     #[error("invalid change data")]
@@ -79,6 +97,41 @@ impl From<String> for NoteId {
     fn from(s: String) -> Self {
         Self(s)
     }
+}
+
+/// Opaque folder identifier: 16 random bytes, hex-encoded. `""` is the reserved
+/// root (no folder), not a real id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FolderId(String);
+
+impl FolderId {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut bytes);
+        let mut s = String::with_capacity(32);
+        for b in bytes {
+            s.push_str(&format!("{b:02x}"));
+        }
+        Self(s)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for FolderId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// A folder node: its id, display name, and parent folder id (`""` = root).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderMeta {
+    pub id: FolderId,
+    pub name: String,
+    pub parent: String,
 }
 
 /// Listing view of a note: everything except the full text body.
@@ -201,14 +254,17 @@ impl NoteStore {
         self.touch(&note, now)
     }
 
-    pub fn set_folder(
+    /// Move a note into a folder (`folder_id`), or to the top level with
+    /// [`ROOT_FOLDER`]. The folder must exist.
+    pub fn move_note(
         &mut self,
         id: &NoteId,
-        folder: &str,
+        folder_id: &str,
         now: Timestamp,
     ) -> Result<(), ModelError> {
+        self.require_folder(folder_id)?;
         let note = self.note_obj(id)?;
-        self.doc.put(&note, FOLDER, folder)?;
+        self.doc.put(&note, FOLDER, folder_id)?;
         self.touch(&note, now)
     }
 
@@ -281,6 +337,74 @@ impl NoteStore {
         self.touch(&note, now)
     }
 
+    // --- folders ---
+
+    /// Create a folder under `parent_id` ([`ROOT_FOLDER`] for top level).
+    pub fn create_folder(
+        &mut self,
+        name: &str,
+        parent_id: &str,
+        _now: Timestamp,
+    ) -> Result<FolderId, ModelError> {
+        self.require_folder(parent_id)?;
+        let id = FolderId::generate();
+        let folder = self
+            .doc
+            .put_object(ROOT, folder_key(id.as_str()), ObjType::Map)?;
+        self.doc.put(&folder, NAME, name)?;
+        self.doc.put(&folder, PARENT, parent_id)?;
+        Ok(id)
+    }
+
+    pub fn rename_folder(&mut self, id: &FolderId, name: &str) -> Result<(), ModelError> {
+        let folder = self.folder_obj(id)?;
+        self.doc.put(&folder, NAME, name)?;
+        Ok(())
+    }
+
+    /// Reparent a folder. Rejects moving a folder into itself or a descendant.
+    pub fn move_folder(&mut self, id: &FolderId, new_parent: &str) -> Result<(), ModelError> {
+        if new_parent == id.as_str() {
+            return Err(ModelError::InvalidMove("a folder cannot be its own parent"));
+        }
+        self.require_folder(new_parent)?;
+        if self.is_descendant(new_parent, id.as_str()) {
+            return Err(ModelError::InvalidMove(
+                "cannot move a folder into its own descendant",
+            ));
+        }
+        let folder = self.folder_obj(id)?;
+        self.doc.put(&folder, PARENT, new_parent)?;
+        Ok(())
+    }
+
+    /// Delete a folder, reparenting its child folders and notes to its parent.
+    pub fn delete_folder(&mut self, id: &FolderId, now: Timestamp) -> Result<(), ModelError> {
+        let folder = self.folder_obj(id)?;
+        let parent = self.str_field(&folder, PARENT)?;
+
+        for child in self.list_folders()? {
+            if child.parent == id.as_str() {
+                let obj = self.folder_obj(&child.id)?;
+                self.doc.put(&obj, PARENT, parent.as_str())?;
+            }
+        }
+        let orphans: Vec<NoteId> = self
+            .list()?
+            .into_iter()
+            .filter(|n| n.folder == id.as_str())
+            .map(|n| n.id)
+            .collect();
+        for note_id in orphans {
+            let note = self.note_obj(&note_id)?;
+            self.doc.put(&note, FOLDER, parent.as_str())?;
+            self.touch(&note, now)?;
+        }
+
+        self.doc.delete(ROOT, folder_key(id.as_str()))?;
+        Ok(())
+    }
+
     // --- queries ---
 
     /// Full note by id, or `None` if it does not exist.
@@ -305,9 +429,62 @@ impl NoteStore {
     pub fn list(&self) -> Result<Vec<NoteMeta>, ModelError> {
         let mut out = Vec::new();
         for id_str in self.doc.keys(ROOT) {
+            if is_folder_key(&id_str) {
+                continue;
+            }
             out.push(self.meta_of(&id_str)?);
         }
         Ok(out)
+    }
+
+    /// Every folder node, unordered.
+    pub fn list_folders(&self) -> Result<Vec<FolderMeta>, ModelError> {
+        let mut out = Vec::new();
+        for key in self.doc.keys(ROOT) {
+            let Some(id) = key.strip_prefix(FOLDER_PREFIX) else {
+                continue;
+            };
+            let obj = self
+                .child_object(&ROOT, &key)?
+                .ok_or(ModelError::Malformed("folder vanished mid-iteration"))?;
+            out.push(FolderMeta {
+                id: FolderId(id.to_string()),
+                name: self.str_field(&obj, NAME)?,
+                parent: self.str_field(&obj, PARENT)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Slash-joined display path for a folder id (`""` for root). Cycle-safe:
+    /// a parent chain that loops (possible only under a pathological merge) is
+    /// broken rather than looping forever.
+    pub fn folder_path(&self, id: &str) -> Result<String, ModelError> {
+        if id == ROOT_FOLDER {
+            return Ok(String::new());
+        }
+        let byid: HashMap<String, FolderMeta> = self
+            .list_folders()?
+            .into_iter()
+            .map(|f| (f.id.0.clone(), f))
+            .collect();
+        let mut parts = Vec::new();
+        let mut seen = HashSet::new();
+        let mut cur = id.to_string();
+        while cur != ROOT_FOLDER {
+            if !seen.insert(cur.clone()) {
+                break;
+            }
+            match byid.get(&cur) {
+                Some(f) => {
+                    parts.push(f.name.clone());
+                    cur = f.parent.clone();
+                }
+                None => break,
+            }
+        }
+        parts.reverse();
+        Ok(parts.join("/"))
     }
 
     /// Notes whose title or Markdown body contains `query`, case-insensitively.
@@ -315,6 +492,9 @@ impl NoteStore {
         let needle = query.to_lowercase();
         let mut out = Vec::new();
         for id_str in self.doc.keys(ROOT) {
+            if is_folder_key(&id_str) {
+                continue;
+            }
             let Some(note) = self.child_object(&ROOT, &id_str)? else {
                 continue;
             };
@@ -338,6 +518,45 @@ impl NoteStore {
     fn note_obj(&self, id: &NoteId) -> Result<ObjId, ModelError> {
         self.child_object(&ROOT, id.as_str())?
             .ok_or_else(|| ModelError::NotFound(id.0.clone()))
+    }
+
+    fn folder_obj(&self, id: &FolderId) -> Result<ObjId, ModelError> {
+        self.child_object(&ROOT, &folder_key(id.as_str()))?
+            .ok_or_else(|| ModelError::FolderNotFound(id.0.clone()))
+    }
+
+    /// `Ok` if the id is the root sentinel or an existing folder.
+    fn require_folder(&self, id: &str) -> Result<(), ModelError> {
+        if id == ROOT_FOLDER || self.child_object(&ROOT, &folder_key(id))?.is_some() {
+            Ok(())
+        } else {
+            Err(ModelError::FolderNotFound(id.to_string()))
+        }
+    }
+
+    /// Is `candidate` inside the subtree rooted at `ancestor`? Cycle-safe.
+    fn is_descendant(&self, candidate: &str, ancestor: &str) -> bool {
+        let byid: HashMap<String, String> = self
+            .list_folders()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| (f.id.0, f.parent))
+            .collect();
+        let mut cur = candidate.to_string();
+        let mut seen = HashSet::new();
+        while cur != ROOT_FOLDER {
+            if cur == ancestor {
+                return true;
+            }
+            if !seen.insert(cur.clone()) {
+                return false;
+            }
+            match byid.get(&cur) {
+                Some(p) => cur = p.clone(),
+                None => return false,
+            }
+        }
+        false
     }
 
     fn text_obj(&self, note: &ObjId) -> Result<ObjId, ModelError> {
@@ -400,6 +619,14 @@ impl NoteStore {
     }
 }
 
+fn folder_key(id: &str) -> String {
+    format!("{FOLDER_PREFIX}{id}")
+}
+
+fn is_folder_key(key: &str) -> bool {
+    key.starts_with(FOLDER_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,17 +634,89 @@ mod tests {
     #[test]
     fn create_and_read() {
         let mut s = NoteStore::new();
+        let home = s.create_folder("home", ROOT_FOLDER, 100).unwrap();
         let id = s.create_note(100).unwrap();
         s.set_title(&id, "Groceries", 110).unwrap();
-        s.set_folder(&id, "home", 110).unwrap();
+        s.move_note(&id, home.as_str(), 110).unwrap();
         s.replace_text(&id, "- milk\n- eggs", 120).unwrap();
 
         let note = s.get_note(&id).unwrap().unwrap();
         assert_eq!(note.title, "Groceries");
-        assert_eq!(note.folder, "home");
+        assert_eq!(note.folder, home.as_str());
+        assert_eq!(s.folder_path(&note.folder).unwrap(), "home");
         assert_eq!(note.text, "- milk\n- eggs");
         assert_eq!(note.created, 100);
         assert_eq!(note.updated, 120);
+    }
+
+    #[test]
+    fn folder_hierarchy_and_paths() {
+        let mut s = NoteStore::new();
+        let work = s.create_folder("work", ROOT_FOLDER, 1).unwrap();
+        let proj = s.create_folder("projects", work.as_str(), 1).unwrap();
+        assert_eq!(s.folder_path(proj.as_str()).unwrap(), "work/projects");
+        assert_eq!(s.list_folders().unwrap().len(), 2);
+
+        // move_note validates the target folder exists.
+        let n = s.create_note(1).unwrap();
+        assert!(s.move_note(&n, "nonexistent", 2).is_err());
+        s.move_note(&n, proj.as_str(), 2).unwrap();
+        assert_eq!(s.get_note(&n).unwrap().unwrap().folder, proj.as_str());
+
+        // Notes are excluded from folder listings and vice versa.
+        assert_eq!(s.list().unwrap().len(), 1);
+
+        // rename + move
+        s.rename_folder(&proj, "proj").unwrap();
+        assert_eq!(s.folder_path(proj.as_str()).unwrap(), "work/proj");
+        s.move_folder(&proj, ROOT_FOLDER).unwrap();
+        assert_eq!(s.folder_path(proj.as_str()).unwrap(), "proj");
+
+        // cannot move a folder into its own descendant
+        let child = s.create_folder("child", proj.as_str(), 1).unwrap();
+        assert!(s.move_folder(&proj, child.as_str()).is_err());
+        assert!(s.move_folder(&proj, proj.as_str()).is_err());
+    }
+
+    #[test]
+    fn delete_folder_reparents_children() {
+        let mut s = NoteStore::new();
+        let a = s.create_folder("a", ROOT_FOLDER, 1).unwrap();
+        let b = s.create_folder("b", a.as_str(), 1).unwrap();
+        let n = s.create_note(1).unwrap();
+        s.move_note(&n, a.as_str(), 1).unwrap();
+
+        s.delete_folder(&a, 2).unwrap();
+        // b and the note reparent to a's parent (root).
+        assert_eq!(s.get_note(&n).unwrap().unwrap().folder, ROOT_FOLDER);
+        assert_eq!(
+            s.list_folders()
+                .unwrap()
+                .iter()
+                .find(|f| f.id == b)
+                .unwrap()
+                .parent,
+            ROOT_FOLDER
+        );
+    }
+
+    #[test]
+    fn folders_merge_across_devices() {
+        let mut a = NoteStore::new();
+        let mut b = NoteStore::load(&a.save()).unwrap();
+        // Concurrent folder creation on two devices — distinct ids, both survive.
+        a.create_folder("from-a", ROOT_FOLDER, 1).unwrap();
+        b.create_folder("from-b", ROOT_FOLDER, 1).unwrap();
+        a.merge(&mut b).unwrap();
+        let names: Vec<String> = a
+            .list_folders()
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"from-a".to_string()));
+        assert!(names.contains(&"from-b".to_string()));
     }
 
     #[test]
@@ -530,10 +829,11 @@ mod tests {
     #[test]
     fn merge_is_symmetric() {
         let mut a = NoteStore::new();
+        let work = a.create_folder("work", ROOT_FOLDER, 1).unwrap();
         let id = a.create_note(1).unwrap();
         let mut b = NoteStore::load(&a.save()).unwrap();
 
-        a.set_folder(&id, "work", 2).unwrap();
+        a.move_note(&id, work.as_str(), 2).unwrap();
         b.add_tag(&id, "x", 2).unwrap();
 
         let mut a2 = NoteStore::load(&a.save()).unwrap();

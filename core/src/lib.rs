@@ -11,7 +11,9 @@ pub mod model;
 pub mod sync;
 
 pub use crypto::{Aad, CryptoError, GroupKey, Kind, open, seal};
-pub use model::{ModelError, Note, NoteId, NoteMeta, NoteStore, Timestamp};
+pub use model::{
+    FolderId, FolderMeta, ModelError, Note, NoteId, NoteMeta, NoteStore, ROOT_FOLDER, Timestamp,
+};
 pub use sync::{SyncConfig, SyncError, sync_once};
 
 /// Crate version, surfaced to clients for diagnostics.
