@@ -5,12 +5,13 @@
 //! relay's boundary, handled later by `core::sync`.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
+use fs2::FileExt;
 use note_core::{FolderId, NoteId, NoteStore, Timestamp};
 
 /// Resolve the default store file path: `$PN_STORE`, else
@@ -45,8 +46,61 @@ impl LocalStore {
         Self::new(default_store_path())
     }
 
-    /// Load the store, or start an empty one if the file does not exist yet.
+    /// Load the store under a shared lock, or start empty if it does not exist.
     pub fn load(&self) -> Result<NoteStore> {
+        let _lock = self.lock(false)?;
+        self.load_raw()
+    }
+
+    /// Persist the store under an exclusive lock.
+    pub fn save(&self, store: &mut NoteStore) -> Result<()> {
+        let _lock = self.lock(true)?;
+        self.save_raw(store)
+    }
+
+    /// Read the store under a shared lock. Use for read-only operations.
+    pub fn read<T>(&self, f: impl FnOnce(&NoteStore) -> Result<T>) -> Result<T> {
+        let _lock = self.lock(false)?;
+        let doc = self.load_raw()?;
+        f(&doc)
+    }
+
+    /// Atomically load, mutate, and save under a single exclusive lock. This is
+    /// the safe primitive for concurrent writers (CLI, daemon): each mutation
+    /// sees the latest on-disk state and no update is lost.
+    pub fn update<T>(&self, f: impl FnOnce(&mut NoteStore) -> Result<T>) -> Result<T> {
+        let _lock = self.lock(true)?;
+        let mut doc = self.load_raw()?;
+        let out = f(&mut doc)?;
+        self.save_raw(&mut doc)?;
+        Ok(out)
+    }
+
+    /// Acquire an advisory lock on a sibling lock file. The returned handle
+    /// releases the lock when dropped. `load`/`save`/`read`/`update` use their
+    /// own scopes, so they never deadlock each other within one process.
+    fn lock(&self, exclusive: bool) -> Result<File> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let lock_path = self.path.with_extension("lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("opening lock file {}", lock_path.display()))?;
+        if exclusive {
+            file.lock_exclusive()
+        } else {
+            file.lock_shared()
+        }
+        .with_context(|| format!("locking {}", lock_path.display()))?;
+        Ok(file)
+    }
+
+    fn load_raw(&self) -> Result<NoteStore> {
         match fs::read(&self.path) {
             Ok(bytes) => NoteStore::load(&bytes)
                 .with_context(|| format!("loading store at {}", self.path.display())),
@@ -55,11 +109,7 @@ impl LocalStore {
         }
     }
 
-    /// Persist the store, creating the parent directory if needed.
-    pub fn save(&self, store: &mut NoteStore) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+    fn save_raw(&self, store: &mut NoteStore) -> Result<()> {
         fs::write(&self.path, store.save())
             .with_context(|| format!("writing store at {}", self.path.display()))
     }
@@ -163,5 +213,45 @@ mod tests {
         s.create_note(2).unwrap();
         // The empty prefix matches every note.
         assert!(resolve_id(&s, "").is_err());
+    }
+
+    #[test]
+    fn concurrent_updates_do_not_clobber() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "pn-lock-test-{}-{}.automerge",
+            std::process::id(),
+            CTR.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        // Many threads each create a note through `update` on the same path. The
+        // file lock serializes load->mutate->save, so every note survives.
+        const N: i64 = 12;
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = LocalStore::new(p);
+                store
+                    .update(|doc| {
+                        doc.create_note(i)?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let count = LocalStore::new(path.clone())
+            .read(|doc| Ok(doc.list()?.len()))
+            .unwrap();
+        assert_eq!(count, N as usize);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("lock"));
     }
 }
