@@ -130,9 +130,10 @@ the trash; a **Corbeille** entry at the bottom of the sidebar toggles a view of
 trashed notes where they can be restored, purged, or emptied in bulk. Folders
 have their own `⋯` menu to rename, move, or delete them. An **Aperçu** toggle
 renders the note's Markdown in place, and a footer shows the live word and
-character count. Keyboard shortcuts: `Ctrl+N` new note, `Ctrl+W` close tab,
-`Ctrl+F` search, `Ctrl+PageUp`/`Ctrl+PageDown` switch tabs. Needs GTK 4 and
-libadwaita installed.
+character count. When the device is enrolled, files can be attached, downloaded,
+and removed straight from the editor. Keyboard shortcuts: `Ctrl+N` new note,
+`Ctrl+W` close tab, `Ctrl+F` search, `Ctrl+PageUp`/`Ctrl+PageDown` switch tabs.
+Needs GTK 4 (≥ 4.10) and libadwaita installed.
 
 ## Roadmap
 

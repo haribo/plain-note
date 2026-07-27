@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -33,6 +34,7 @@ struct Tab {
     text_view: gtk::TextView,
     buffer: gtk::TextBuffer,
     tags_box: gtk::Box,
+    atts_box: gtk::Box,
 }
 
 struct State {
@@ -1246,9 +1248,32 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     footer.append(&preview_toggle);
     footer.append(&count_label);
 
+    // Attachments row: one chip per attachment + an "add" button. The button is
+    // only sensitive when the device is enrolled (attach needs the relay).
+    let atts_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let attach_btn = gtk::Button::from_icon_name("mail-attachment-symbolic");
+    attach_btn.add_css_class("flat");
+    attach_btn.set_tooltip_text(Some("Joindre un fichier"));
+    let enrolled = config::Settings::load_from(&config::config_path()).is_ok();
+    attach_btn.set_sensitive(enrolled);
+    if !enrolled {
+        attach_btn.set_tooltip_text(Some("Nécessite la synchronisation"));
+    }
+    let atts_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    atts_row.set_margin_start(18);
+    atts_row.set_margin_end(18);
+    atts_row.set_margin_top(4);
+    atts_row.append(&attach_btn);
+    atts_row.append(&atts_box);
+    let atts_scroll = gtk::ScrolledWindow::builder()
+        .child(&atts_row)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor.append(&title);
     editor.append(&tags_scroll);
+    editor.append(&atts_scroll);
     editor.append(&stack);
     editor.append(&footer);
 
@@ -1352,6 +1377,26 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         });
     }
 
+    // Attach a file: pick it, then upload on a background runtime.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        attach_btn.connect_clicked(move |btn| {
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Joindre un fichier");
+            let window = btn.root().and_downcast::<gtk::Window>();
+            let ui = ui.clone();
+            let state = state.clone();
+            let id = id.clone();
+            dialog.open(window.as_ref(), gtk::gio::Cancellable::NONE, move |res| {
+                let Ok(file) = res else { return };
+                let Some(path) = file.path() else { return };
+                upload_attachment(&ui, &state, &id, path);
+            });
+        });
+    }
+
     let tab = Tab {
         id: id.clone(),
         page,
@@ -1359,9 +1404,170 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         text_view,
         buffer,
         tags_box: tags_box.clone(),
+        atts_box: atts_box.clone(),
     };
     fill_tags(state, &tags_box, &id);
+    fill_attachments(ui, state, &atts_box, &id);
     tab
+}
+
+/// Rebuild the attachment chips of one editor pane. Each chip downloads on
+/// click; the trailing ✕ drops the reference (the blob stays on the relay).
+fn fill_attachments(ui: &Ui, state: &Rc<RefCell<State>>, atts_box: &gtk::Box, id: &NoteId) {
+    while let Some(child) = atts_box.first_child() {
+        atts_box.remove(&child);
+    }
+    let atts = {
+        let st = state.borrow();
+        st.doc
+            .get_note(id)
+            .ok()
+            .flatten()
+            .map(|n| n.attachments)
+            .unwrap_or_default()
+    };
+    let enrolled = config::Settings::load_from(&config::config_path()).is_ok();
+    for (aid, name) in atts {
+        let chip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        chip.add_css_class("pn-chip");
+        let open = gtk::Button::with_label(&format!("📎 {name}"));
+        open.add_css_class("flat");
+        open.set_sensitive(enrolled);
+        open.set_tooltip_text(Some(if enrolled {
+            "Télécharger"
+        } else {
+            "Nécessite la synchronisation"
+        }));
+        {
+            let (id, aid, name) = (id.clone(), aid.clone(), name.clone());
+            open.connect_clicked(move |btn| {
+                download_attachment(&id, &aid, &name, btn);
+            });
+        }
+        let remove = gtk::Button::from_icon_name("window-close-symbolic");
+        remove.add_css_class("flat");
+        remove.set_tooltip_text(Some("Retirer"));
+        {
+            let (ui, state, id, aid, atts_box) = (
+                ui.clone(),
+                state.clone(),
+                id.clone(),
+                aid.clone(),
+                atts_box.clone(),
+            );
+            remove.connect_clicked(move |_| {
+                mutate(&state, |doc| {
+                    doc.remove_attachment(&id, &aid, store::now_millis())
+                });
+                fill_attachments(&ui, &state, &atts_box, &id);
+            });
+        }
+        chip.append(&open);
+        chip.append(&remove);
+        atts_box.append(&chip);
+    }
+}
+
+/// Reload the in-memory doc from disk (after a background op wrote to it).
+fn reload_from_disk(state: &Rc<RefCell<State>>) {
+    let loaded = state.borrow().store.load();
+    if let Ok(doc) = loaded {
+        let sig = content_sig(&doc);
+        let mut st = state.borrow_mut();
+        st.doc = doc;
+        st.last_sig = sig;
+    }
+}
+
+/// Encrypt and upload `path` as an attachment of `id`, off the main loop.
+fn upload_attachment(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId, path: PathBuf) {
+    let (tx, rx) = async_channel::bounded::<Result<(), String>>(1);
+    let cfg = config::config_path();
+    let note = id.as_str().to_string();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send_blocking(Err(e.to_string()));
+                return;
+            }
+        };
+        let store = LocalStore::at_default();
+        let now = store::now_millis();
+        let r = rt
+            .block_on(remote::attach(&cfg, &store, now, &note, &path))
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let _ = tx.send_blocking(r);
+    });
+
+    let ui = ui.clone();
+    let state = state.clone();
+    let id = id.clone();
+    glib::spawn_future_local(async move {
+        match rx.recv().await {
+            Ok(Ok(())) => {
+                reload_from_disk(&state);
+                let atts_box = state
+                    .borrow()
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.atts_box.clone());
+                if let Some(b) = atts_box {
+                    fill_attachments(&ui, &state, &b, &id);
+                }
+            }
+            Ok(Err(e)) => eprintln!("plain-note-gui: attach failed: {e}"),
+            Err(_) => {}
+        }
+    });
+}
+
+/// Download and decrypt an attachment to a chosen location, off the main loop.
+fn download_attachment(id: &NoteId, aid: &str, name: &str, anchor: &impl IsA<gtk::Widget>) {
+    let dialog = gtk::FileDialog::new();
+    dialog.set_title("Enregistrer la pièce jointe");
+    dialog.set_initial_name(Some(name));
+    let window = anchor.root().and_downcast::<gtk::Window>();
+    let cfg = config::config_path();
+    let note = id.as_str().to_string();
+    let aid = aid.to_string();
+    dialog.save(window.as_ref(), gtk::gio::Cancellable::NONE, move |res| {
+        let Ok(file) = res else { return };
+        let Some(path) = file.path() else { return };
+        let (tx, rx) = async_channel::bounded::<Result<PathBuf, String>>(1);
+        let cfg = cfg.clone();
+        let note = note.clone();
+        let aid = aid.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send_blocking(Err(e.to_string()));
+                    return;
+                }
+            };
+            let store = LocalStore::at_default();
+            let r = rt
+                .block_on(remote::fetch(&cfg, &store, &note, &aid, Some(path)))
+                .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(r);
+        });
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(p)) => eprintln!("plain-note-gui: saved {}", p.display()),
+                Ok(Err(e)) => eprintln!("plain-note-gui: download failed: {e}"),
+                Err(_) => {}
+            }
+        });
+    });
 }
 
 /// Rebuild the tag chips of one editor pane from the note's current tags.
@@ -1543,6 +1749,7 @@ fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
         }
         tab.page.set_title(note_title(&note.title));
         fill_tags(state, &tab.tags_box, &tab.id);
+        fill_attachments(ui, state, &tab.atts_box, &tab.id);
     }
 
     rebuild_tree(ui, state);
