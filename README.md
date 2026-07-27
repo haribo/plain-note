@@ -122,7 +122,7 @@ cargo run -p plain-note-gui
 ```
 
 A unified sidebar tree of folders and notes (notes without a folder sit at the
-root) with search, a **tabbed** Markdown editor (open several notes at once)
+root, and the expand/collapse state is remembered across restarts) with search, a **tabbed** Markdown editor (open several notes at once)
 with tags and auto-save, and **live auto-sync** (background, when the device is
 enrolled). Each note has a `⋯` menu
 to pin it (pinned notes surface first), move it to another folder, or send it to

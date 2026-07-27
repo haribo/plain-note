@@ -89,7 +89,7 @@ fn build_ui(app: &adw::Application) {
         store,
         doc,
         rows: Vec::new(),
-        expanded: HashSet::new(),
+        expanded: load_expanded(&gui_state_path()),
         sel_folder: None,
         tabs: Vec::new(),
         current: None,
@@ -187,6 +187,7 @@ fn build_ui(app: &adw::Application) {
                             st.expanded.insert(id.clone());
                         }
                         st.sel_folder = Some(id);
+                        save_expanded(&gui_state_path(), &st.expanded);
                     }
                     rebuild_tree(&ui, &state);
                     reselect_current(&ui, &state);
@@ -734,6 +735,54 @@ fn md_to_pango(src: &str) -> String {
         }
     }
     out
+}
+
+// --- expanded-folders persistence (device-local UI state) ---
+
+/// Path of the device-local file storing the expanded folder ids: `PN_GUI_STATE`
+/// if set, else `$XDG_STATE_HOME/plain-note/expanded`, else `~/.local/state/...`.
+fn gui_state_path() -> PathBuf {
+    if let Ok(p) = std::env::var("PN_GUI_STATE") {
+        return PathBuf::from(p);
+    }
+    let base = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".local/state")
+        });
+    base.join("plain-note").join("expanded")
+}
+
+/// Serialize expanded folder ids as one sorted id per line (dependency-free).
+fn serialize_expanded(set: &HashSet<String>) -> String {
+    let mut ids: Vec<&str> = set.iter().map(|s| s.as_str()).collect();
+    ids.sort_unstable();
+    ids.join("\n")
+}
+
+/// Parse the expanded-folders file: one id per line, blanks ignored.
+fn parse_expanded(text: &str) -> HashSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn load_expanded(path: &std::path::Path) -> HashSet<String> {
+    std::fs::read_to_string(path)
+        .map(|s| parse_expanded(&s))
+        .unwrap_or_default()
+}
+
+fn save_expanded(path: &std::path::Path, set: &HashSet<String>) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(path, serialize_expanded(set)) {
+        eprintln!("plain-note-gui: could not save expanded state: {e}");
+    }
 }
 
 /// Count notes in `folder_id` and all its descendant folders.
@@ -2154,9 +2203,26 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::{
-        count_text, md_to_pango, set_heading_line, subtree_note_count, toggle_line_prefix,
-        wrap_or_unwrap,
+        count_text, md_to_pango, parse_expanded, serialize_expanded, set_heading_line,
+        subtree_note_count, toggle_line_prefix, wrap_or_unwrap,
     };
+    use std::collections::HashSet;
+
+    #[test]
+    fn expanded_round_trips() {
+        let set: HashSet<String> = ["b".to_string(), "a".to_string()].into_iter().collect();
+        // Serialized form is sorted and stable.
+        assert_eq!(serialize_expanded(&set), "a\nb");
+        assert_eq!(parse_expanded(&serialize_expanded(&set)), set);
+    }
+
+    #[test]
+    fn parse_expanded_ignores_blank_lines() {
+        assert_eq!(parse_expanded(""), HashSet::new());
+        let got = parse_expanded("a\n\n  \nb\n");
+        let want: HashSet<String> = ["a".to_string(), "b".to_string()].into_iter().collect();
+        assert_eq!(got, want);
+    }
 
     #[test]
     fn subtree_count_includes_descendants() {
