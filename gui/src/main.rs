@@ -431,7 +431,37 @@ fn install_shortcuts(
         );
     }
 
+    // Formatting shortcuts act on the active tab's text view.
+    let fmt = |accel: &str, op: fn(&gtk::TextBuffer)| {
+        let state = state.clone();
+        add(
+            accel,
+            Box::new(move || {
+                if let Some(tv) = active_text_view(&state) {
+                    op(&tv.buffer());
+                    tv.grab_focus();
+                }
+                true
+            }),
+        );
+    };
+    fmt("<Control>b", |b| apply_wrap(b, "**"));
+    fmt("<Control>i", |b| apply_wrap(b, "*"));
+    fmt("<Control>e", |b| apply_wrap(b, "`"));
+    fmt("<Control>k", apply_link);
+
     window.add_controller(controller);
+}
+
+/// The text view of the currently active tab, if any.
+fn active_text_view(state: &Rc<RefCell<State>>) -> Option<gtk::TextView> {
+    let cur = state.borrow().current.clone()?;
+    state
+        .borrow()
+        .tabs
+        .iter()
+        .find(|t| t.id == cur)
+        .map(|t| t.text_view.clone())
 }
 
 /// Rebuild the sidebar: a folders+notes tree, or a flat match list when
@@ -699,6 +729,62 @@ fn md_to_pango(src: &str) -> String {
         }
     }
     out
+}
+
+// --- Markdown formatting transforms (pure, unit-tested) ---
+
+/// Wrap `text` with `marker`, or unwrap it if already wrapped (toggle).
+fn wrap_or_unwrap(text: &str, marker: &str) -> String {
+    if text.len() >= 2 * marker.len() && text.starts_with(marker) && text.ends_with(marker) {
+        text[marker.len()..text.len() - marker.len()].to_string()
+    } else {
+        format!("{marker}{text}{marker}")
+    }
+}
+
+/// The heading level of a line (1..=6), or 0 if it is not a heading.
+fn heading_level_of(line: &str) -> usize {
+    let h = line.len() - line.trim_start_matches('#').len();
+    if (1..=6).contains(&h) && line[h..].starts_with(' ') {
+        h
+    } else {
+        0
+    }
+}
+
+/// Toggle a heading of `level` on a line: apply it, change level, or remove it.
+fn set_heading_line(line: &str, level: usize) -> String {
+    let cur = heading_level_of(line);
+    let body = if cur > 0 { &line[cur + 1..] } else { line };
+    if cur == level {
+        body.to_string()
+    } else {
+        format!("{} {body}", "#".repeat(level))
+    }
+}
+
+/// Strip a leading list/quote marker (`- `, `* `, `> `, or `N. `) if present.
+fn strip_list_marker(line: &str) -> &str {
+    for p in ["- ", "* ", "> "] {
+        if let Some(rest) = line.strip_prefix(p) {
+            return rest;
+        }
+    }
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 && line[digits..].starts_with(". ") {
+        return &line[digits + 2..];
+    }
+    line
+}
+
+/// Toggle a line prefix (`- `, `1. `, `> `): remove it if present, else replace
+/// any existing list/quote marker with it.
+fn toggle_line_prefix(line: &str, prefix: &str) -> String {
+    if let Some(rest) = line.strip_prefix(prefix) {
+        rest.to_string()
+    } else {
+        format!("{prefix}{}", strip_list_marker(line))
+    }
 }
 
 /// A French word/character summary, e.g. "42 mots · 210 caractères".
@@ -1207,7 +1293,174 @@ fn mutate(
     st.persist();
 }
 
-/// Open a note in a tab: focus its existing tab, or build a fresh editor pane.
+// --- buffer-level formatting actions ---
+
+/// The current selection, or a zero-width range at the cursor if none.
+fn sel_bounds(b: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
+    if let Some(bounds) = b.selection_bounds() {
+        bounds
+    } else {
+        let c = b.iter_at_mark(&b.get_insert());
+        (c, c)
+    }
+}
+
+/// Wrap/unwrap the selection with an inline `marker` (e.g. `**`, `*`, `` ` ``).
+fn apply_wrap(b: &gtk::TextBuffer, marker: &str) {
+    let (mut s, mut e) = sel_bounds(b);
+    let off = s.offset();
+    let text = b.text(&s, &e, false).to_string();
+    let empty = text.is_empty();
+    let new = wrap_or_unwrap(&text, marker);
+    b.delete(&mut s, &mut e);
+    let mut ins = b.iter_at_offset(off);
+    b.insert(&mut ins, &new);
+    if empty {
+        let cur = b.iter_at_offset(off + marker.chars().count() as i32);
+        b.place_cursor(&cur);
+    } else {
+        let a = b.iter_at_offset(off);
+        let z = b.iter_at_offset(off + new.chars().count() as i32);
+        b.select_range(&a, &z);
+    }
+}
+
+/// Apply a per-line transform to every line the selection spans.
+fn transform_lines(b: &gtk::TextBuffer, f: impl Fn(&str) -> String) {
+    let (s, e) = sel_bounds(b);
+    let (first, last) = (s.line(), e.line());
+    let Some(mut ls) = b.iter_at_line(first) else {
+        return;
+    };
+    let Some(mut le) = b.iter_at_line(last) else {
+        return;
+    };
+    le.forward_to_line_end();
+    let off = ls.offset();
+    let block = b.text(&ls, &le, false).to_string();
+    let new = block.split('\n').map(f).collect::<Vec<_>>().join("\n");
+    b.delete(&mut ls, &mut le);
+    let mut ins = b.iter_at_offset(off);
+    b.insert(&mut ins, &new);
+    let a = b.iter_at_offset(off);
+    let z = b.iter_at_offset(off + new.chars().count() as i32);
+    b.select_range(&a, &z);
+}
+
+/// Insert a fenced code block around the selection.
+fn apply_code_block(b: &gtk::TextBuffer) {
+    let (mut s, mut e) = sel_bounds(b);
+    let off = s.offset();
+    let text = b.text(&s, &e, false).to_string();
+    let new = format!("```\n{text}\n```");
+    b.delete(&mut s, &mut e);
+    let mut ins = b.iter_at_offset(off);
+    b.insert(&mut ins, &new);
+    // Place the cursor on the (possibly empty) content line.
+    let cur = b.iter_at_offset(off + 4 + text.chars().count() as i32);
+    b.place_cursor(&cur);
+}
+
+/// Insert a Markdown link, selecting the `url` placeholder for quick typing.
+fn apply_link(b: &gtk::TextBuffer) {
+    let (mut s, mut e) = sel_bounds(b);
+    let off = s.offset();
+    let text = b.text(&s, &e, false).to_string();
+    let label = if text.is_empty() { "texte" } else { &text };
+    let new = format!("[{label}](url)");
+    b.delete(&mut s, &mut e);
+    let mut ins = b.iter_at_offset(off);
+    b.insert(&mut ins, &new);
+    // "url" sits after "[label](".
+    let url_start = off + 1 + label.chars().count() as i32 + 2;
+    let a = b.iter_at_offset(url_start);
+    let z = b.iter_at_offset(url_start + 3);
+    b.select_range(&a, &z);
+}
+
+/// A formatting toolbar bound to one editor's text view. Buttons return focus
+/// to the text so typing continues right after a formatting action.
+fn format_toolbar(text_view: &gtk::TextView) -> gtk::Box {
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    bar.add_css_class("toolbar");
+    bar.set_margin_start(18);
+    bar.set_margin_end(18);
+
+    let buffer = text_view.buffer();
+    let button = |markup: &str, tip: &str, op: Box<dyn Fn(&gtk::TextBuffer)>| -> gtk::Button {
+        let label = gtk::Label::new(None);
+        label.set_markup(markup);
+        let btn = gtk::Button::builder().child(&label).build();
+        btn.add_css_class("flat");
+        btn.set_tooltip_text(Some(tip));
+        let buffer = buffer.clone();
+        let tv = text_view.clone();
+        btn.connect_clicked(move |_| {
+            op(&buffer);
+            tv.grab_focus();
+        });
+        btn
+    };
+    let sep = || {
+        let s = gtk::Separator::new(gtk::Orientation::Vertical);
+        s.set_margin_top(4);
+        s.set_margin_bottom(4);
+        s
+    };
+
+    bar.append(&button(
+        "<b>B</b>",
+        "Gras (Ctrl+B)",
+        Box::new(|b| apply_wrap(b, "**")),
+    ));
+    bar.append(&button(
+        "<i>I</i>",
+        "Italique (Ctrl+I)",
+        Box::new(|b| apply_wrap(b, "*")),
+    ));
+    bar.append(&button(
+        "<s>S</s>",
+        "Barré",
+        Box::new(|b| apply_wrap(b, "~~")),
+    ));
+    bar.append(&button(
+        "<tt>&lt;/&gt;</tt>",
+        "Code (Ctrl+E)",
+        Box::new(|b| apply_wrap(b, "`")),
+    ));
+    bar.append(&sep());
+    for level in 1..=3usize {
+        bar.append(&button(
+            &format!("H{level}"),
+            &format!("Titre {level}"),
+            Box::new(move |b| transform_lines(b, |l| set_heading_line(l, level))),
+        ));
+    }
+    bar.append(&sep());
+    bar.append(&button(
+        "•",
+        "Liste à puces",
+        Box::new(|b| transform_lines(b, |l| toggle_line_prefix(l, "- "))),
+    ));
+    bar.append(&button(
+        "1.",
+        "Liste numérotée",
+        Box::new(|b| transform_lines(b, |l| toggle_line_prefix(l, "1. "))),
+    ));
+    bar.append(&button(
+        "❝",
+        "Citation",
+        Box::new(|b| transform_lines(b, |l| toggle_line_prefix(l, "> "))),
+    ));
+    bar.append(&button(
+        "<tt>{ }</tt>",
+        "Bloc de code",
+        Box::new(apply_code_block),
+    ));
+    bar.append(&button("🔗", "Lien (Ctrl+K)", Box::new(apply_link)));
+    bar
+}
+
 fn open_note(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
     let existing = state
         .borrow()
@@ -1330,10 +1583,13 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
+    let toolbar = format_toolbar(&text_view);
+
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor.append(&title);
     editor.append(&tags_scroll);
     editor.append(&atts_scroll);
+    editor.append(&toolbar);
     editor.append(&stack);
     editor.append(&footer);
 
@@ -1868,7 +2124,31 @@ fn install_css() {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_text, md_to_pango};
+    use super::{count_text, md_to_pango, set_heading_line, toggle_line_prefix, wrap_or_unwrap};
+
+    #[test]
+    fn wrap_and_unwrap_toggles() {
+        assert_eq!(wrap_or_unwrap("gras", "**"), "**gras**");
+        assert_eq!(wrap_or_unwrap("**gras**", "**"), "gras");
+        assert_eq!(wrap_or_unwrap("", "*"), "**");
+        assert_eq!(wrap_or_unwrap("x", "`"), "`x`");
+    }
+
+    #[test]
+    fn heading_toggles_and_switches_level() {
+        assert_eq!(set_heading_line("Titre", 1), "# Titre");
+        assert_eq!(set_heading_line("# Titre", 1), "Titre"); // same level -> off
+        assert_eq!(set_heading_line("# Titre", 2), "## Titre"); // switch level
+        assert_eq!(set_heading_line("### Titre", 2), "## Titre");
+    }
+
+    #[test]
+    fn line_prefix_toggles_and_replaces() {
+        assert_eq!(toggle_line_prefix("item", "- "), "- item");
+        assert_eq!(toggle_line_prefix("- item", "- "), "item"); // off
+        assert_eq!(toggle_line_prefix("- item", "1. "), "1. item"); // replace marker
+        assert_eq!(toggle_line_prefix("1. item", "> "), "> item");
+    }
 
     #[test]
     fn count_text_pluralizes() {
