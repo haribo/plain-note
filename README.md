@@ -123,8 +123,11 @@ cargo run -p plain-note-gui
 
 A unified sidebar tree of folders and notes (notes without a folder sit at the
 root) with search, a Markdown editor with tags and auto-save, and **live
-auto-sync** (background, when the device is enrolled). Needs GTK 4 and
-libadwaita installed.
+auto-sync** (background, when the device is enrolled). Each note has a `⋯` menu
+to pin it (pinned notes surface first), move it to another folder, or send it to
+the trash; a **Corbeille** entry at the bottom of the sidebar toggles a view of
+trashed notes where they can be restored, purged, or emptied in bulk. Needs
+GTK 4 and libadwaita installed.
 
 ## Roadmap
 
