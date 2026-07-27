@@ -24,7 +24,8 @@ See [`docs/design/overview.md`](docs/design/overview.md) for the full design and
 | `cli/`        | Rust — command-line client (binary: `pn`) |
 | `relay/`      | Rust — zero-knowledge relay server (binary: `pn-relay`, Axum + WebSocket) |
 | `gui/`        | Rust — GTK4 + libadwaita desktop client (binary: `plain-note-gui`) |
-| Android       | Kotlin/Jetpack Compose over the Rust core via UniFFI (planned) |
+| `mobile/`     | Rust — UniFFI facade exposing the core to Kotlin (`plain-note-mobile`) |
+| `android/`    | Kotlin/Jetpack Compose app over the `mobile` facade (see `docs/android/`) |
 
 ## Build
 
