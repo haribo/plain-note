@@ -20,6 +20,7 @@ const APP_ID: &str = "dev.plainnote.PlainNote";
 enum RowKind {
     Folder(String),
     Note(NoteId),
+    Trash,
 }
 
 struct State {
@@ -30,6 +31,7 @@ struct State {
     sel_folder: Option<String>, // context folder for new note/folder
     current: Option<NoteId>,
     query: String,
+    trash_view: bool,
     loading: bool,
     last_sig: String,
 }
@@ -79,6 +81,7 @@ fn build_ui(app: &adw::Application) {
         sel_folder: None,
         current: None,
         query: String::new(),
+        trash_view: false,
         loading: false,
         last_sig: String::new(),
     }));
@@ -222,6 +225,13 @@ fn build_ui(app: &adw::Application) {
                         .map(|n| n.folder);
                     state.borrow_mut().sel_folder = folder;
                     show_note_by_id(&ui, &state, &id);
+                }
+                Some(RowKind::Trash) => {
+                    {
+                        let mut st = state.borrow_mut();
+                        st.trash_view = !st.trash_view;
+                    }
+                    rebuild_tree(&ui, &state);
                 }
                 None => {}
             }
@@ -399,9 +409,27 @@ fn rebuild_tree(ui: &Ui, state: &Rc<RefCell<State>>) {
         ui.tree.remove(&child);
     }
     let mut rows: Vec<RowKind> = Vec::new();
-    let query = state.borrow().query.trim().to_string();
+    let (query, trash_view) = {
+        let st = state.borrow();
+        (st.query.trim().to_string(), st.trash_view)
+    };
 
-    if query.is_empty() {
+    if trash_view {
+        let mut notes = state.borrow().doc.list_trashed().unwrap_or_default();
+        notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
+        for n in &notes {
+            ui.tree.append(&note_row(
+                ui,
+                state,
+                &n.id,
+                note_title(&n.title),
+                0,
+                false,
+                true,
+            ));
+            rows.push(RowKind::Note(n.id.clone()));
+        }
+    } else if query.is_empty() {
         let (folders, notes) = {
             let st = state.borrow();
             (
@@ -410,20 +438,50 @@ fn rebuild_tree(ui: &Ui, state: &Rc<RefCell<State>>) {
             )
         };
         let expanded = state.borrow().expanded.clone();
-        walk(ui, &folders, &notes, ROOT_FOLDER, 0, &expanded, &mut rows);
+        walk(
+            ui,
+            state,
+            &folders,
+            &notes,
+            ROOT_FOLDER,
+            0,
+            &expanded,
+            &mut rows,
+        );
     } else {
         let mut notes = state.borrow().doc.search(&query).unwrap_or_default();
-        notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
+        notes.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
         for n in &notes {
-            ui.tree.append(&note_row(0, note_title(&n.title)));
+            ui.tree.append(&note_row(
+                ui,
+                state,
+                &n.id,
+                note_title(&n.title),
+                0,
+                n.pinned,
+                false,
+            ));
             rows.push(RowKind::Note(n.id.clone()));
         }
     }
+
+    let trash_count = state
+        .borrow()
+        .doc
+        .list_trashed()
+        .map(|v| v.len())
+        .unwrap_or(0);
+    ui.tree
+        .append(&trash_row(ui, state, trash_count, trash_view));
+    rows.push(RowKind::Trash);
+
     state.borrow_mut().rows = rows;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     ui: &Ui,
+    state: &Rc<RefCell<State>>,
     folders: &[note_core::FolderMeta],
     notes: &[note_core::NoteMeta],
     parent: &str,
@@ -441,14 +499,31 @@ fn walk(
             .append(&folder_row(depth, &f.name, is_expanded, count));
         rows.push(RowKind::Folder(f.id.as_str().to_string()));
         if is_expanded {
-            walk(ui, folders, notes, f.id.as_str(), depth + 1, expanded, rows);
+            walk(
+                ui,
+                state,
+                folders,
+                notes,
+                f.id.as_str(),
+                depth + 1,
+                expanded,
+                rows,
+            );
         }
     }
     let mut child_notes: Vec<&note_core::NoteMeta> =
         notes.iter().filter(|n| n.folder == parent).collect();
-    child_notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
+    child_notes.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
     for n in child_notes {
-        ui.tree.append(&note_row(depth, note_title(&n.title)));
+        ui.tree.append(&note_row(
+            ui,
+            state,
+            &n.id,
+            note_title(&n.title),
+            depth,
+            n.pinned,
+            false,
+        ));
         rows.push(RowKind::Note(n.id.clone()));
     }
 }
@@ -487,12 +562,21 @@ fn folder_row(depth: usize, name: &str, expanded: bool, count: usize) -> gtk::Li
     row
 }
 
-fn note_row(depth: usize, title: &str) -> gtk::ListBoxRow {
+#[allow(clippy::too_many_arguments)]
+fn note_row(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    title: &str,
+    depth: usize,
+    pinned: bool,
+    trash: bool,
+) -> gtk::ListBoxRow {
     let b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     b.set_margin_start(8 + depth as i32 * 16);
-    b.set_margin_end(8);
-    b.set_margin_top(5);
-    b.set_margin_bottom(5);
+    b.set_margin_end(4);
+    b.set_margin_top(3);
+    b.set_margin_bottom(3);
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_size_request(16, -1);
     let icon = gtk::Image::from_icon_name("text-x-generic-symbolic");
@@ -504,9 +588,238 @@ fn note_row(depth: usize, title: &str) -> gtk::ListBoxRow {
     b.append(&spacer);
     b.append(&icon);
     b.append(&label);
+    if pinned {
+        b.append(&gtk::Image::from_icon_name("view-pin-symbolic"));
+    }
+    b.append(&note_menu(ui, state, id, pinned, trash));
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&b));
     row
+}
+
+fn note_menu(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    pinned: bool,
+    trash: bool,
+) -> gtk::MenuButton {
+    let mb = gtk::MenuButton::new();
+    mb.set_icon_name("view-more-symbolic");
+    mb.add_css_class("flat");
+    mb.set_valign(gtk::Align::Center);
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    menu.set_margin_top(4);
+    menu.set_margin_bottom(4);
+    menu.set_margin_start(4);
+    menu.set_margin_end(4);
+    let popover = gtk::Popover::new();
+    popover.set_child(Some(&menu));
+    mb.set_popover(Some(&popover));
+
+    let item = |label: &str| {
+        let btn = gtk::Button::with_label(label);
+        btn.add_css_class("flat");
+        if let Some(lbl) = btn.child().and_downcast::<gtk::Label>() {
+            lbl.set_xalign(0.0);
+        }
+        btn
+    };
+
+    if trash {
+        let restore = item("Restaurer");
+        {
+            let (ui, state, id, pop) = (ui.clone(), state.clone(), id.clone(), popover.clone());
+            restore.connect_clicked(move |_| {
+                pop.popdown();
+                mutate(&state, |doc| doc.restore_note(&id, store::now_millis()));
+                rebuild_tree(&ui, &state);
+            });
+        }
+        let purge = item("Supprimer définitivement");
+        purge.add_css_class("destructive-action");
+        {
+            let (ui, state, id, pop) = (ui.clone(), state.clone(), id.clone(), popover.clone());
+            purge.connect_clicked(move |_| {
+                pop.popdown();
+                mutate(&state, |doc| doc.delete_note(&id));
+                rebuild_tree(&ui, &state);
+            });
+        }
+        menu.append(&restore);
+        menu.append(&purge);
+    } else {
+        let pin = item(if pinned { "Désépingler" } else { "Épingler" });
+        {
+            let (ui, state, id, pop) = (ui.clone(), state.clone(), id.clone(), popover.clone());
+            pin.connect_clicked(move |_| {
+                pop.popdown();
+                mutate(&state, |doc| {
+                    doc.set_pinned(&id, !pinned, store::now_millis())
+                });
+                rebuild_tree(&ui, &state);
+            });
+        }
+        let move_btn = item("Déplacer vers…");
+        {
+            let (ui, state, id) = (ui.clone(), state.clone(), id.clone());
+            let pop = popover.clone();
+            move_btn.connect_clicked(move |btn| {
+                pop.popdown();
+                open_move_dialog(&ui, &state, &id, btn);
+            });
+        }
+        let trash_btn = item("Mettre à la corbeille");
+        {
+            let (ui, state, id, pop) = (ui.clone(), state.clone(), id.clone(), popover.clone());
+            trash_btn.connect_clicked(move |_| {
+                pop.popdown();
+                mutate(&state, |doc| doc.trash_note(&id, store::now_millis()));
+                rebuild_tree(&ui, &state);
+            });
+        }
+        menu.append(&pin);
+        menu.append(&move_btn);
+        menu.append(&trash_btn);
+    }
+    mb
+}
+
+fn open_move_dialog(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    anchor: &impl IsA<gtk::Widget>,
+) {
+    // Destination list: root + every folder by path.
+    let mut ids: Vec<String> = vec![ROOT_FOLDER.to_string()];
+    let mut labels: Vec<String> = vec!["Racine".to_string()];
+    {
+        let st = state.borrow();
+        let mut folders: Vec<(String, String)> = st
+            .doc
+            .list_folders()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| {
+                let path = st.doc.folder_path(f.id.as_str()).unwrap_or_default();
+                (f.id.as_str().to_string(), path)
+            })
+            .collect();
+        folders.sort_by(|a, b| a.1.cmp(&b.1));
+        for (fid, path) in folders {
+            ids.push(fid);
+            labels.push(path);
+        }
+    }
+    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let dropdown = gtk::DropDown::from_strings(&label_refs);
+
+    let dialog = adw::AlertDialog::new(Some("Déplacer vers"), None);
+    dialog.set_extra_child(Some(&dropdown));
+    dialog.add_response("cancel", "Annuler");
+    dialog.add_response("move", "Déplacer");
+    dialog.set_response_appearance("move", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("move"));
+    dialog.set_close_response("cancel");
+
+    let ui = ui.clone();
+    let state = state.clone();
+    let id = id.clone();
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "move" {
+            return;
+        }
+        let idx = dropdown.selected() as usize;
+        if let Some(folder) = ids.get(idx) {
+            let folder = folder.clone();
+            mutate(&state, |doc| {
+                doc.move_note(&id, &folder, store::now_millis())
+            });
+            rebuild_tree(&ui, &state);
+        }
+    });
+    dialog.present(Some(anchor));
+}
+
+fn trash_row(ui: &Ui, state: &Rc<RefCell<State>>, count: usize, active: bool) -> gtk::ListBoxRow {
+    let b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    b.set_margin_start(8);
+    b.set_margin_end(4);
+    b.set_margin_top(3);
+    b.set_margin_bottom(3);
+    let icon = gtk::Image::from_icon_name("user-trash-symbolic");
+    let label = gtk::Label::new(Some("Corbeille"));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_halign(gtk::Align::Start);
+    if active {
+        label.add_css_class("accent");
+    }
+    let count_label = gtk::Label::new(Some(&count.to_string()));
+    count_label.add_css_class("dim-label");
+    count_label.add_css_class("caption");
+    b.append(&icon);
+    b.append(&label);
+    b.append(&count_label);
+
+    if count > 0 {
+        let mb = gtk::MenuButton::new();
+        mb.set_icon_name("view-more-symbolic");
+        mb.add_css_class("flat");
+        mb.set_valign(gtk::Align::Center);
+        let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        menu.set_margin_top(4);
+        menu.set_margin_bottom(4);
+        menu.set_margin_start(4);
+        menu.set_margin_end(4);
+        let popover = gtk::Popover::new();
+        popover.set_child(Some(&menu));
+        mb.set_popover(Some(&popover));
+        let empty = gtk::Button::with_label("Vider la corbeille");
+        empty.add_css_class("flat");
+        empty.add_css_class("destructive-action");
+        if let Some(lbl) = empty.child().and_downcast::<gtk::Label>() {
+            lbl.set_xalign(0.0);
+        }
+        {
+            let (ui, state, pop) = (ui.clone(), state.clone(), popover.clone());
+            empty.connect_clicked(move |_| {
+                pop.popdown();
+                {
+                    let mut st = state.borrow_mut();
+                    let ids: Vec<NoteId> = st
+                        .doc
+                        .list_trashed()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|n| n.id)
+                        .collect();
+                    for id in &ids {
+                        let _ = st.doc.delete_note(id);
+                    }
+                    st.persist();
+                }
+                rebuild_tree(&ui, &state);
+            });
+        }
+        menu.append(&empty);
+        b.append(&mb);
+    }
+
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&b));
+    row
+}
+
+/// Apply a mutation to the in-memory doc and persist it.
+fn mutate(
+    state: &Rc<RefCell<State>>,
+    f: impl FnOnce(&mut NoteStore) -> Result<(), note_core::ModelError>,
+) {
+    let mut st = state.borrow_mut();
+    let _ = f(&mut st.doc);
+    st.persist();
 }
 
 /// Update the title label of the currently selected row without rebuilding
