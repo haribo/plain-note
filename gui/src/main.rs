@@ -226,29 +226,7 @@ fn build_ui(app: &adw::Application) {
     {
         let ui = ui.clone();
         let state = state.clone();
-        new_btn.connect_clicked(move |_| {
-            let now = store::now_millis();
-            let created = {
-                let mut st = state.borrow_mut();
-                match st.doc.create_note(now) {
-                    Ok(id) => {
-                        if let Some(f) = st.sel_folder.clone() {
-                            let _ = st.doc.move_note(&id, &f, now);
-                        }
-                        st.persist();
-                        Some(id)
-                    }
-                    Err(_) => None,
-                }
-            };
-            if let Some(id) = created {
-                rebuild_tree(&ui, &state);
-                open_note(&ui, &state, &id);
-                if let Some(tab) = state.borrow().tabs.iter().find(|t| t.id == id) {
-                    tab.title.grab_focus();
-                }
-            }
-        });
+        new_btn.connect_clicked(move |_| create_note(&ui, &state));
     }
 
     // New folder (dialog).
@@ -339,7 +317,100 @@ fn build_ui(app: &adw::Application) {
         .build();
     window.set_title(Some("Plain Note"));
     window.set_content(Some(&split));
+    install_shortcuts(&window, &ui, &state, &search);
     window.present();
+}
+
+/// Create a note in the selected folder, open it in a tab, focus its title.
+fn create_note(ui: &Ui, state: &Rc<RefCell<State>>) {
+    let now = store::now_millis();
+    let created = {
+        let mut st = state.borrow_mut();
+        match st.doc.create_note(now) {
+            Ok(id) => {
+                if let Some(f) = st.sel_folder.clone() {
+                    let _ = st.doc.move_note(&id, &f, now);
+                }
+                st.persist();
+                Some(id)
+            }
+            Err(_) => None,
+        }
+    };
+    if let Some(id) = created {
+        rebuild_tree(ui, state);
+        open_note(ui, state, &id);
+        if let Some(tab) = state.borrow().tabs.iter().find(|t| t.id == id) {
+            tab.title.grab_focus();
+        }
+    }
+}
+
+/// Window-level keyboard shortcuts.
+fn install_shortcuts(
+    window: &adw::ApplicationWindow,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    search: &gtk::SearchEntry,
+) {
+    let controller = gtk::ShortcutController::new();
+    controller.set_scope(gtk::ShortcutScope::Global);
+
+    let add = |accel: &str, callback: Box<dyn Fn() -> bool>| {
+        let trigger = gtk::ShortcutTrigger::parse_string(accel);
+        let action = gtk::CallbackAction::new(move |_, _| callback().into());
+        controller.add_shortcut(gtk::Shortcut::new(trigger, Some(action)));
+    };
+
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        add(
+            "<Control>n",
+            Box::new(move || {
+                create_note(&ui, &state);
+                true
+            }),
+        );
+    }
+    {
+        let tab_view = ui.tab_view.clone();
+        add(
+            "<Control>w",
+            Box::new(move || {
+                if let Some(page) = tab_view.selected_page() {
+                    tab_view.close_page(&page);
+                }
+                true
+            }),
+        );
+    }
+    {
+        let search = search.clone();
+        add(
+            "<Control>f",
+            Box::new(move || {
+                search.grab_focus();
+                true
+            }),
+        );
+    }
+    {
+        let tab_view = ui.tab_view.clone();
+        add(
+            "<Control>Page_Down",
+            Box::new(move || tab_view.select_next_page()),
+        );
+    }
+    {
+        let tab_view = ui.tab_view.clone();
+        add(
+            "<Control>Page_Up",
+            Box::new(move || tab_view.select_previous_page()),
+        );
+    }
+
+    window.add_controller(controller);
 }
 
 /// Rebuild the sidebar: a folders+notes tree, or a flat match list when
@@ -478,6 +549,19 @@ fn walk(
 
 fn note_title(t: &str) -> &str {
     if t.is_empty() { "(sans titre)" } else { t }
+}
+
+/// A French word/character summary, e.g. "42 mots · 210 caractères".
+fn count_text(text: &str) -> String {
+    let words = text.split_whitespace().count();
+    let chars = text.chars().count();
+    let w = if words == 1 { "mot" } else { "mots" };
+    let c = if chars == 1 {
+        "caractère"
+    } else {
+        "caractères"
+    };
+    format!("{words} {w} · {chars} {c}")
 }
 
 fn folder_row(
@@ -997,18 +1081,43 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vexpand(true)
         .build();
 
+    // Word/character count footer, updated live as the body changes.
+    let count_label = gtk::Label::new(None);
+    count_label.add_css_class("dim-label");
+    count_label.add_css_class("caption");
+    count_label.set_halign(gtk::Align::End);
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    footer.set_margin_start(18);
+    footer.set_margin_end(18);
+    footer.set_margin_top(4);
+    footer.set_margin_bottom(6);
+    footer.append(&count_label);
+
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor.append(&title);
     editor.append(&tags_scroll);
     editor.append(&text_scroll);
+    editor.append(&footer);
 
     // Seed content BEFORE connecting handlers so the initial load never writes
     // back (which would bump the note's `updated` timestamp).
     title.set_text(&note.title);
     buffer.set_text(&note.text);
+    count_label.set_text(&count_text(&note.text));
 
     let page = ui.tab_view.append(&editor);
     page.set_title(note_title(&note.title));
+
+    // Keep the count in sync on every edit (including programmatic reloads).
+    {
+        let count_label = count_label.clone();
+        buffer.connect_changed(move |buf| {
+            let text = buf
+                .text(&buf.start_iter(), &buf.end_iter(), false)
+                .to_string();
+            count_label.set_text(&count_text(&text));
+        });
+    }
 
     // Title edits -> save + update tab, sidebar row and (if active) the header.
     {
@@ -1315,5 +1424,22 @@ fn install_css() {
             &css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_text;
+
+    #[test]
+    fn count_text_pluralizes() {
+        assert_eq!(count_text(""), "0 mots · 0 caractères");
+        assert_eq!(count_text("a"), "1 mot · 1 caractère");
+        assert_eq!(count_text("un deux"), "2 mots · 7 caractères");
+    }
+
+    #[test]
+    fn count_text_ignores_extra_whitespace() {
+        assert_eq!(count_text("  un   deux  "), "2 mots · 13 caractères");
     }
 }
