@@ -127,8 +127,9 @@ with tags and auto-save, and **live auto-sync** (background, when the device is
 enrolled). Each note has a `⋯` menu
 to pin it (pinned notes surface first), move it to another folder, or send it to
 the trash; a **Corbeille** entry at the bottom of the sidebar toggles a view of
-trashed notes where they can be restored, purged, or emptied in bulk. Needs
-GTK 4 and libadwaita installed.
+trashed notes where they can be restored, purged, or emptied in bulk. Folders
+have their own `⋯` menu to rename, move, or delete them. Needs GTK 4 and
+libadwaita installed.
 
 ## Roadmap
 

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use note_core::{NoteId, NoteStore, ROOT_FOLDER};
+use note_core::{FolderId, NoteId, NoteStore, ROOT_FOLDER};
 use plain_note_client::store::{self, LocalStore};
 use plain_note_client::{config, remote};
 
@@ -436,8 +436,15 @@ fn walk(
     for f in subfolders {
         let is_expanded = expanded.contains(f.id.as_str());
         let count = notes.iter().filter(|n| n.folder == f.id.as_str()).count();
-        ui.tree
-            .append(&folder_row(depth, &f.name, is_expanded, count));
+        ui.tree.append(&folder_row(
+            ui,
+            state,
+            f.id.as_str(),
+            depth,
+            &f.name,
+            is_expanded,
+            count,
+        ));
         rows.push(RowKind::Folder(f.id.as_str().to_string()));
         if is_expanded {
             walk(
@@ -473,12 +480,20 @@ fn note_title(t: &str) -> &str {
     if t.is_empty() { "(sans titre)" } else { t }
 }
 
-fn folder_row(depth: usize, name: &str, expanded: bool, count: usize) -> gtk::ListBoxRow {
+fn folder_row(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &str,
+    depth: usize,
+    name: &str,
+    expanded: bool,
+    count: usize,
+) -> gtk::ListBoxRow {
     let b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     b.set_margin_start(8 + depth as i32 * 16);
-    b.set_margin_end(8);
-    b.set_margin_top(5);
-    b.set_margin_bottom(5);
+    b.set_margin_end(4);
+    b.set_margin_top(3);
+    b.set_margin_bottom(3);
     let chevron = gtk::Image::from_icon_name(if expanded {
         "pan-down-symbolic"
     } else {
@@ -491,16 +506,170 @@ fn folder_row(depth: usize, name: &str, expanded: bool, count: usize) -> gtk::Li
     label.set_halign(gtk::Align::Start);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label.add_css_class("pn-folder");
-    let count = gtk::Label::new(Some(&count.to_string()));
-    count.add_css_class("dim-label");
-    count.add_css_class("caption");
+    let count_label = gtk::Label::new(Some(&count.to_string()));
+    count_label.add_css_class("dim-label");
+    count_label.add_css_class("caption");
     b.append(&chevron);
     b.append(&icon);
     b.append(&label);
-    b.append(&count);
+    b.append(&count_label);
+    b.append(&folder_menu(ui, state, id, name));
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&b));
     row
+}
+
+/// The `⋯` menu on a folder row: rename, move, delete.
+fn folder_menu(ui: &Ui, state: &Rc<RefCell<State>>, id: &str, name: &str) -> gtk::MenuButton {
+    let mb = gtk::MenuButton::new();
+    mb.set_icon_name("view-more-symbolic");
+    mb.add_css_class("flat");
+    mb.set_valign(gtk::Align::Center);
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    menu.set_margin_top(4);
+    menu.set_margin_bottom(4);
+    menu.set_margin_start(4);
+    menu.set_margin_end(4);
+    let popover = gtk::Popover::new();
+    popover.set_child(Some(&menu));
+    mb.set_popover(Some(&popover));
+
+    let item = |label: &str| {
+        let btn = gtk::Button::with_label(label);
+        btn.add_css_class("flat");
+        if let Some(lbl) = btn.child().and_downcast::<gtk::Label>() {
+            lbl.set_xalign(0.0);
+        }
+        btn
+    };
+
+    let rename = item("Renommer");
+    {
+        let (ui, state, id, name) = (ui.clone(), state.clone(), id.to_string(), name.to_string());
+        let pop = popover.clone();
+        rename.connect_clicked(move |btn| {
+            pop.popdown();
+            open_rename_folder_dialog(&ui, &state, &id, &name, btn);
+        });
+    }
+    let move_btn = item("Déplacer vers…");
+    {
+        let (ui, state, id) = (ui.clone(), state.clone(), id.to_string());
+        let pop = popover.clone();
+        move_btn.connect_clicked(move |btn| {
+            pop.popdown();
+            open_move_folder_dialog(&ui, &state, &id, btn);
+        });
+    }
+    let delete = item("Supprimer");
+    delete.add_css_class("destructive-action");
+    {
+        let (ui, state, id) = (ui.clone(), state.clone(), id.to_string());
+        let pop = popover.clone();
+        delete.connect_clicked(move |_| {
+            pop.popdown();
+            mutate(&state, |doc| {
+                doc.delete_folder(&FolderId::from(id.clone()), store::now_millis())
+            });
+            rebuild_tree(&ui, &state);
+        });
+    }
+    menu.append(&rename);
+    menu.append(&move_btn);
+    menu.append(&delete);
+    mb
+}
+
+fn open_rename_folder_dialog(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &str,
+    name: &str,
+    anchor: &impl IsA<gtk::Widget>,
+) {
+    let entry = gtk::Entry::builder()
+        .text(name)
+        .activates_default(true)
+        .build();
+    let dialog = adw::AlertDialog::new(Some("Renommer le dossier"), None);
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Annuler");
+    dialog.add_response("rename", "Renommer");
+    dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("rename"));
+    dialog.set_close_response("cancel");
+
+    let (ui, state, id) = (ui.clone(), state.clone(), id.to_string());
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "rename" {
+            return;
+        }
+        let new_name = entry.text().to_string();
+        if new_name.trim().is_empty() {
+            return;
+        }
+        mutate(&state, |doc| {
+            doc.rename_folder(&FolderId::from(id.clone()), new_name.trim())
+        });
+        rebuild_tree(&ui, &state);
+    });
+    dialog.present(Some(anchor));
+}
+
+fn open_move_folder_dialog(
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &str,
+    anchor: &impl IsA<gtk::Widget>,
+) {
+    // Destinations: root + every folder except the one being moved.
+    let mut ids: Vec<String> = vec![ROOT_FOLDER.to_string()];
+    let mut labels: Vec<String> = vec!["Racine".to_string()];
+    {
+        let st = state.borrow();
+        let mut folders: Vec<(String, String)> = st
+            .doc
+            .list_folders()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| f.id.as_str() != id)
+            .map(|f| {
+                let path = st.doc.folder_path(f.id.as_str()).unwrap_or_default();
+                (f.id.as_str().to_string(), path)
+            })
+            .collect();
+        folders.sort_by(|a, b| a.1.cmp(&b.1));
+        for (fid, path) in folders {
+            ids.push(fid);
+            labels.push(path);
+        }
+    }
+    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let dropdown = gtk::DropDown::from_strings(&label_refs);
+
+    let dialog = adw::AlertDialog::new(Some("Déplacer le dossier vers"), None);
+    dialog.set_extra_child(Some(&dropdown));
+    dialog.add_response("cancel", "Annuler");
+    dialog.add_response("move", "Déplacer");
+    dialog.set_response_appearance("move", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("move"));
+    dialog.set_close_response("cancel");
+
+    let (ui, state, id) = (ui.clone(), state.clone(), id.to_string());
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "move" {
+            return;
+        }
+        let idx = dropdown.selected() as usize;
+        if let Some(parent) = ids.get(idx) {
+            let parent = parent.clone();
+            mutate(&state, |doc| {
+                doc.move_folder(&FolderId::from(id.clone()), &parent)
+            });
+            rebuild_tree(&ui, &state);
+        }
+    });
+    dialog.present(Some(anchor));
 }
 
 #[allow(clippy::too_many_arguments)]
