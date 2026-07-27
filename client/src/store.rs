@@ -148,10 +148,18 @@ pub fn resolve_folder_id(store: &NoteStore, prefix: &str) -> Result<FolderId> {
 }
 
 /// Resolve a possibly-abbreviated note id to a full one. Accepts any unique
-/// prefix of an existing note's hex id.
+/// prefix of an existing (non-trashed) note's hex id.
 pub fn resolve_id(store: &NoteStore, prefix: &str) -> Result<NoteId> {
-    let matches: Vec<NoteId> = store
-        .list()?
+    resolve_from(store.list()?, prefix)
+}
+
+/// Like [`resolve_id`] but over trashed notes (for restore/purge).
+pub fn resolve_trashed_id(store: &NoteStore, prefix: &str) -> Result<NoteId> {
+    resolve_from(store.list_trashed()?, prefix)
+}
+
+fn resolve_from(notes: Vec<note_core::NoteMeta>, prefix: &str) -> Result<NoteId> {
+    let matches: Vec<NoteId> = notes
         .into_iter()
         .map(|m| m.id)
         .filter(|id| id.as_str().starts_with(prefix))

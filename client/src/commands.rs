@@ -8,7 +8,7 @@
 use anyhow::{Result, anyhow};
 use note_core::{FolderId, FolderMeta, Note, NoteId, NoteMeta, Timestamp};
 
-use crate::store::{LocalStore, resolve_folder_id, resolve_id};
+use crate::store::{LocalStore, resolve_folder_id, resolve_id, resolve_trashed_id};
 
 pub fn new_note(
     store: &LocalStore,
@@ -49,7 +49,8 @@ pub fn list(store: &LocalStore, folder: Option<&str>, tag: Option<&str>) -> Resu
             folder_id.as_deref().is_none_or(|f| n.folder.as_str() == f)
                 && tag.is_none_or(|t| n.tags.iter().any(|x| x == t))
         });
-        notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
+        // Pinned first, then most recently updated.
+        notes.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
         Ok(notes)
     })
 }
@@ -200,9 +201,62 @@ pub fn remove_tag(
     })
 }
 
-pub fn delete(store: &LocalStore, id_prefix: &str) -> Result<NoteId> {
+/// Move an active note to the trash (soft delete).
+pub fn trash(store: &LocalStore, now: Timestamp, id_prefix: &str) -> Result<NoteId> {
     store.update(|doc| {
         let id = resolve_id(doc, id_prefix)?;
+        doc.trash_note(&id, now)?;
+        Ok(id)
+    })
+}
+
+/// Restore a trashed note.
+pub fn restore(store: &LocalStore, now: Timestamp, id_prefix: &str) -> Result<NoteId> {
+    store.update(|doc| {
+        let id = resolve_trashed_id(doc, id_prefix)?;
+        doc.restore_note(&id, now)?;
+        Ok(id)
+    })
+}
+
+/// Every trashed note, newest first.
+pub fn list_trashed(store: &LocalStore) -> Result<Vec<NoteMeta>> {
+    store.read(|doc| {
+        let mut notes = doc.list_trashed()?;
+        notes.sort_by_key(|n| std::cmp::Reverse(n.updated));
+        Ok(notes)
+    })
+}
+
+/// Permanently delete every trashed note. Returns how many were purged.
+pub fn empty_trash(store: &LocalStore) -> Result<usize> {
+    store.update(|doc| {
+        let ids: Vec<NoteId> = doc.list_trashed()?.into_iter().map(|n| n.id).collect();
+        for id in &ids {
+            doc.delete_note(id)?;
+        }
+        Ok(ids.len())
+    })
+}
+
+/// Pin or unpin a note.
+pub fn set_pinned(
+    store: &LocalStore,
+    now: Timestamp,
+    id_prefix: &str,
+    pinned: bool,
+) -> Result<NoteId> {
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.set_pinned(&id, pinned, now)?;
+        Ok(id)
+    })
+}
+
+/// Permanently delete a note by id (active or trashed).
+pub fn delete(store: &LocalStore, id_prefix: &str) -> Result<NoteId> {
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix).or_else(|_| resolve_trashed_id(doc, id_prefix))?;
         doc.delete_note(&id)?;
         Ok(id)
     })
