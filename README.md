@@ -126,7 +126,8 @@ root) with search, a **tabbed** Markdown editor (open several notes at once)
 with tags and auto-save, and **live auto-sync** (background, when the device is
 enrolled). Each note has a `⋯` menu
 to pin it (pinned notes surface first), move it to another folder, or send it to
-the trash; a **Corbeille** entry at the bottom of the sidebar toggles a view of
+the trash; notes can also be **dragged** onto a folder (or onto empty space to
+reach the root) to move them; a **Corbeille** entry at the bottom of the sidebar toggles a view of
 trashed notes where they can be restored, purged, or emptied in bulk. Folders
 have their own `⋯` menu to rename, move, or delete them. An **Aperçu** toggle
 renders the note's Markdown in place, and a footer shows the live word and
