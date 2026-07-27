@@ -53,7 +53,14 @@ The store file is created in the app's private `filesDir`
   compilation.
 - The Gradle wrapper jar is not committed; generate it on import.
 
+## Sync & pairing
+
+One-shot sync and device pairing are wired to the facade (see
+`docs/design/mobile-sync.md`): the list screen's toolbar has **Synchroniser** and
+**Associer** actions. Pairing currently accepts the blob as pasted text; a QR
+scanner (CameraX + ML Kit) replacing the text field is the planned follow-up.
+
 ## Not yet implemented
 
-Sync + QR pairing (needs a design note), attachments, and folders/trash/pin UI
-(the facade already supports them).
+QR scanner UI, continuous/background sync (WorkManager), attachments, and
+folders/trash/pin UI (the facade already supports the data operations).

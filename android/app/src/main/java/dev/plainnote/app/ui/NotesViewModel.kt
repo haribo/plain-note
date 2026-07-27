@@ -10,11 +10,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * Holds the note list and the note being edited. Every facade call runs on the
- * IO dispatcher, never the main thread.
+ * Holds the note list, the note being edited, and a transient status line.
+ * Every facade call runs on the IO dispatcher, never the main thread.
  */
 class NotesViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -25,6 +24,9 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _editing = MutableStateFlow<NoteContent?>(null)
     val editing = _editing.asStateFlow()
+
+    private val _status = MutableStateFlow<String?>(null)
+    val status = _status.asStateFlow()
 
     init {
         refresh()
@@ -59,7 +61,35 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
 
     fun delete(id: String) = viewModelScope.launch(Dispatchers.IO) {
         repo.delete(id)
-        withContext(Dispatchers.Main) { _editing.value = null }
+        _editing.value = null
         _notes.value = repo.listNotes()
+    }
+
+    fun sync() = viewModelScope.launch(Dispatchers.IO) {
+        _status.value = try {
+            if (!repo.isEnrolled()) {
+                "Appareil non associé"
+            } else {
+                val seq = repo.sync()
+                _notes.value = repo.listNotes()
+                "Synchronisé (seq $seq)"
+            }
+        } catch (e: Exception) {
+            "Échec de la synchronisation : ${e.message}"
+        }
+    }
+
+    fun pair(blob: String) = viewModelScope.launch(Dispatchers.IO) {
+        _status.value = try {
+            repo.pair(blob)
+            _notes.value = repo.listNotes()
+            "Appareil associé"
+        } catch (e: Exception) {
+            "Échec de l'association : ${e.message}"
+        }
+    }
+
+    fun clearStatus() {
+        _status.value = null
     }
 }

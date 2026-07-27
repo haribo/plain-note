@@ -7,11 +7,13 @@
 //!
 //! Increment 1 covers local operations only (no sync/network).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use note_core::NoteMeta;
 use plain_note_client::commands::{self, FolderRow};
 use plain_note_client::store::{self, LocalStore};
+use plain_note_client::{config, remote};
 
 uniffi::setup_scaffolding!();
 
@@ -46,6 +48,13 @@ pub struct FolderInfo {
     pub path: String,
 }
 
+/// A device registered in the sync group.
+#[derive(Debug, uniffi::Record)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub is_self: bool,
+}
+
 /// Errors crossing the FFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AppError {
@@ -57,6 +66,8 @@ pub enum AppError {
     Invalid(String),
     #[error("{0}")]
     Io(String),
+    #[error("{0}")]
+    Network(String),
 }
 
 /// Classify an `anyhow` error into an [`AppError`] variant. The core surfaces
@@ -79,6 +90,23 @@ fn map(e: anyhow::Error) -> AppError {
     }
 }
 
+/// Like [`map`], but unclassified failures default to `Network` — used for
+/// remote operations, where the common failure is the relay being unreachable.
+fn map_net(e: anyhow::Error) -> AppError {
+    match map(e) {
+        AppError::Invalid(m) => AppError::Network(m),
+        other => other,
+    }
+}
+
+/// A short-lived current-thread runtime to drive one async remote call.
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Io(e.to_string()))
+}
+
 type Result<T> = std::result::Result<T, AppError>;
 
 fn summary(m: NoteMeta) -> NoteSummary {
@@ -92,19 +120,23 @@ fn summary(m: NoteMeta) -> NoteSummary {
     }
 }
 
-/// The mobile app handle: a local store plus the operations over it.
+/// The mobile app handle: a local store, the enrollment config path, and the
+/// operations over them.
 #[derive(uniffi::Object)]
 pub struct NoteApp {
     store: LocalStore,
+    config_path: PathBuf,
 }
 
 #[uniffi::export]
 impl NoteApp {
-    /// Open (or lazily create) the store at `store_path`.
+    /// Open (or lazily create) the store at `store_path`; enrollment settings
+    /// live at `config_path` (both under the app's private storage).
     #[uniffi::constructor]
-    pub fn new(store_path: String) -> Arc<Self> {
+    pub fn new(store_path: String, config_path: String) -> Arc<Self> {
         Arc::new(Self {
             store: LocalStore::new(store_path),
+            config_path: PathBuf::from(config_path),
         })
     }
 
@@ -235,6 +267,53 @@ impl NoteApp {
         commands::delete_folder(&self.store, now(), &id).map_err(map)?;
         Ok(())
     }
+
+    // --- sync & pairing (remote) ---
+
+    /// Whether this device is enrolled in a sync group.
+    pub fn is_enrolled(&self) -> bool {
+        config::Settings::load_from(&self.config_path).is_ok()
+    }
+
+    /// Create a new group on the relay and enroll this device (admin). Returns
+    /// the pairing blob to share with another device (e.g. as a QR code).
+    pub fn init_remote(&self, relay_url: String, admin_secret: String) -> Result<String> {
+        runtime()?
+            .block_on(remote::init(&self.config_path, &relay_url, &admin_secret))
+            .map_err(map_net)
+    }
+
+    /// Join an existing group from a pairing blob (e.g. scanned from a QR code).
+    pub fn pair(&self, blob: String) -> Result<()> {
+        runtime()?
+            .block_on(remote::pair(&self.config_path, &blob))
+            .map_err(map_net)
+    }
+
+    /// Push local changes and pull remote ones; returns the new sequence number.
+    pub fn sync(&self) -> Result<u64> {
+        runtime()?
+            .block_on(remote::sync(&self.config_path, &self.store))
+            .map_err(map_net)
+    }
+
+    /// List the devices registered in this group (admin).
+    pub fn list_devices(&self, admin_secret: String) -> Result<Vec<DeviceInfo>> {
+        let devices = runtime()?
+            .block_on(remote::devices(&self.config_path, &admin_secret))
+            .map_err(map_net)?;
+        Ok(devices
+            .into_iter()
+            .map(|(id, is_self)| DeviceInfo { id, is_self })
+            .collect())
+    }
+
+    /// Revoke a device so it can no longer sync (admin).
+    pub fn revoke(&self, device_id: String, admin_secret: String) -> Result<()> {
+        runtime()?
+            .block_on(remote::revoke(&self.config_path, &admin_secret, &device_id))
+            .map_err(map_net)
+    }
 }
 
 fn folder_info(row: FolderRow) -> FolderInfo {
@@ -258,13 +337,27 @@ mod tests {
 
     fn temp_app() -> Arc<NoteApp> {
         static CTR: AtomicU64 = AtomicU64::new(0);
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "pn-mobile-{}-{}.automerge",
-            std::process::id(),
-            CTR.fetch_add(1, Ordering::Relaxed)
-        ));
-        NoteApp::new(p.to_string_lossy().to_string())
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir();
+        let store = dir.join(format!("pn-mobile-{}-{n}.automerge", std::process::id()));
+        let config = dir.join(format!("pn-mobile-{}-{n}.config", std::process::id()));
+        NoteApp::new(
+            store.to_string_lossy().to_string(),
+            config.to_string_lossy().to_string(),
+        )
+    }
+
+    #[test]
+    fn fresh_app_is_not_enrolled() {
+        let app = temp_app();
+        assert!(!app.is_enrolled());
+    }
+
+    #[test]
+    fn sync_without_enrollment_errors() {
+        let app = temp_app();
+        // No config file -> settings load fails; classified as a network error.
+        assert!(app.sync().is_err());
     }
 
     #[test]
