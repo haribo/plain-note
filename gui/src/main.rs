@@ -214,6 +214,25 @@ fn build_ui(app: &adw::Application) {
         });
     }
 
+    // Root drop zone: dropping a note on the tree background (anywhere not a
+    // folder row) moves it to the top level.
+    {
+        let drop = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::MOVE);
+        let ui = ui.clone();
+        let state = state.clone();
+        drop.connect_drop(move |_, value, _, _| {
+            let Ok(note_id) = value.get::<String>() else {
+                return false;
+            };
+            mutate(&state, |doc| {
+                doc.move_note(&NoteId::from(note_id), ROOT_FOLDER, store::now_millis())
+            });
+            rebuild_tree(&ui, &state);
+            true
+        });
+        tree.add_controller(drop);
+    }
+
     // Search.
     {
         let ui = ui.clone();
@@ -731,6 +750,36 @@ fn folder_row(
     b.append(&folder_menu(ui, state, id, name));
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&b));
+
+    // Drop target: dropping a note here moves it into this folder.
+    let drop = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::MOVE);
+    {
+        let (ui, state, fid) = (ui.clone(), state.clone(), id.to_string());
+        let row_ref = row.clone();
+        drop.connect_drop(move |_, value, _, _| {
+            row_ref.remove_css_class("pn-drop");
+            let Ok(note_id) = value.get::<String>() else {
+                return false;
+            };
+            mutate(&state, |doc| {
+                doc.move_note(&NoteId::from(note_id), &fid, store::now_millis())
+            });
+            rebuild_tree(&ui, &state);
+            true
+        });
+    }
+    {
+        let row_ref = row.clone();
+        drop.connect_enter(move |_, _, _| {
+            row_ref.add_css_class("pn-drop");
+            gtk::gdk::DragAction::MOVE
+        });
+    }
+    {
+        let row_ref = row.clone();
+        drop.connect_leave(move |_| row_ref.remove_css_class("pn-drop"));
+    }
+    row.add_controller(drop);
     row
 }
 
@@ -919,6 +968,17 @@ fn note_row(
     b.append(&note_menu(ui, state, id, pinned, trash));
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&b));
+
+    // Drag source: carry the note id so it can be dropped onto a folder.
+    if !trash {
+        let source = gtk::DragSource::new();
+        source.set_actions(gtk::gdk::DragAction::MOVE);
+        let id_str = id.as_str().to_string();
+        source.connect_prepare(move |_, _, _| {
+            Some(gtk::gdk::ContentProvider::for_value(&id_str.to_value()))
+        });
+        row.add_controller(source);
+    }
     row
 }
 
@@ -1794,7 +1854,8 @@ fn install_css() {
         ".pn-title { font-size: 1.4rem; font-weight: 800; } \
          .pn-title text { font-weight: 800; } \
          .pn-folder { font-weight: 600; } \
-         .pn-chip { padding: 2px 8px; min-height: 0; }",
+         .pn-chip { padding: 2px 8px; min-height: 0; } \
+         .pn-drop { background-color: alpha(@accent_bg_color, 0.25); border-radius: 6px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
