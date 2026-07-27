@@ -17,7 +17,9 @@ proc-macros** (`#[uniffi::export]`, no UDL). Kotlin namespace `dev.plainnote.cor
 
 A single stateful object built from a store path:
 
-- `NoteApp(store_path)` — opens/creates the local store.
+- `NoteApp(store_path, config_path)` — opens/creates the local store; the
+  `config_path` (enrollment settings) was added in increment 2, see
+  [mobile-sync.md](mobile-sync.md).
 - Notes: `create_note`, `list_notes(folder?, tag?)`, `search(query)`,
   `get_note(id)`, `set_title`, `set_body`, `move_note(id, folder?)`, `add_tag`,
   `remove_tag`, `trash`, `restore`, `list_trashed`, `empty_trash`, `set_pinned`,
