@@ -65,8 +65,17 @@ enum Command {
     /// Search titles and bodies (case-insensitive substring)
     #[command(visible_aliases = ["s", "find"])]
     Search { query: String },
-    /// Delete a note
+    /// Move a note to the trash
     Rm { id: String },
+    /// Pin a note (surfaced first)
+    Pin { id: String },
+    /// Unpin a note
+    Unpin { id: String },
+    /// Trash: list, restore, or empty
+    Trash {
+        #[command(subcommand)]
+        cmd: TrashCmd,
+    },
     /// Attach a file to a note (encrypt + upload to the relay)
     Attach { id: String, file: PathBuf },
     /// List a note's attachments
@@ -120,6 +129,17 @@ enum FolderCmd {
     },
     /// Delete a folder (its notes and subfolders move to its parent)
     Rm { id: String },
+}
+
+#[derive(Subcommand)]
+enum TrashCmd {
+    /// List trashed notes
+    #[command(visible_alias = "ls")]
+    List,
+    /// Restore a trashed note
+    Restore { id: String },
+    /// Permanently delete all trashed notes
+    Empty,
 }
 
 #[derive(Subcommand)]
@@ -207,9 +227,26 @@ async fn main() -> Result<()> {
             commands::remove_tag(&store, now, &id, &tag)?;
         }
         Command::Rm { id } => {
-            let id = commands::delete(&store, &id)?;
-            println!("deleted {}", short(id.as_str()));
+            let id = commands::trash(&store, now, &id)?;
+            println!("moved {} to trash", short(id.as_str()));
         }
+        Command::Pin { id } => {
+            commands::set_pinned(&store, now, &id, true)?;
+        }
+        Command::Unpin { id } => {
+            commands::set_pinned(&store, now, &id, false)?;
+        }
+        Command::Trash { cmd } => match cmd {
+            TrashCmd::List => print_notes(&store, &commands::list_trashed(&store)?)?,
+            TrashCmd::Restore { id } => {
+                let id = commands::restore(&store, now, &id)?;
+                println!("restored {}", short(id.as_str()));
+            }
+            TrashCmd::Empty => {
+                let n = commands::empty_trash(&store)?;
+                println!("purged {n} note(s)");
+            }
+        },
         Command::Attach { id, file } => {
             let aid = remote::attach(&config::config_path(), &store, now, &id, &file).await?;
             println!("attached {}", short(&aid));
@@ -333,7 +370,8 @@ fn print_notes(store: &LocalStore, notes: &[note_core::NoteMeta]) -> Result<()> 
         } else {
             format!("  #{}", n.tags.join(" #"))
         };
-        println!("{}  {title}{folder}{tags}", short(n.id.as_str()));
+        let pin = if n.pinned { "★ " } else { "" };
+        println!("{}  {pin}{title}{folder}{tags}", short(n.id.as_str()));
     }
     Ok(())
 }

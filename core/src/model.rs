@@ -49,6 +49,8 @@ const CREATED: &str = "created";
 const UPDATED: &str = "updated";
 const NAME: &str = "name";
 const PARENT: &str = "parent";
+const TRASHED: &str = "trashed";
+const PINNED: &str = "pinned";
 
 /// ROOT-key prefix marking a folder entry. Notes are 32-hex ids and never
 /// contain `:`, so the two never collide.
@@ -141,6 +143,8 @@ pub struct NoteMeta {
     pub title: String,
     pub folder: String,
     pub tags: Vec<String>,
+    pub pinned: bool,
+    pub trashed: bool,
     pub created: Timestamp,
     pub updated: Timestamp,
 }
@@ -155,6 +159,8 @@ pub struct Note {
     pub tags: Vec<String>,
     /// Attachment references as `(attachment_id, filename)`.
     pub attachments: Vec<(String, String)>,
+    pub pinned: bool,
+    pub trashed: bool,
     pub created: Timestamp,
     pub updated: Timestamp,
 }
@@ -230,9 +236,39 @@ impl NoteStore {
         self.doc.put_object(&note, ATTACHMENTS, ObjType::Map)?;
         self.doc.put(&note, TITLE, "")?;
         self.doc.put(&note, FOLDER, "")?;
+        self.doc.put(&note, PINNED, false)?;
+        self.doc.put(&note, TRASHED, false)?;
         self.doc.put(&note, CREATED, now)?;
         self.doc.put(&note, UPDATED, now)?;
         Ok(id)
+    }
+
+    /// Move a note to the trash (soft delete). It disappears from [`Self::list`]
+    /// and [`Self::search`] but is kept for restore; use [`Self::delete_note`]
+    /// to purge it.
+    pub fn trash_note(&mut self, id: &NoteId, now: Timestamp) -> Result<(), ModelError> {
+        let note = self.note_obj(id)?;
+        self.doc.put(&note, TRASHED, true)?;
+        self.touch(&note, now)
+    }
+
+    /// Restore a trashed note.
+    pub fn restore_note(&mut self, id: &NoteId, now: Timestamp) -> Result<(), ModelError> {
+        let note = self.note_obj(id)?;
+        self.doc.put(&note, TRASHED, false)?;
+        self.touch(&note, now)
+    }
+
+    /// Pin or unpin a note (clients surface pinned notes first).
+    pub fn set_pinned(
+        &mut self,
+        id: &NoteId,
+        pinned: bool,
+        now: Timestamp,
+    ) -> Result<(), ModelError> {
+        let note = self.note_obj(id)?;
+        self.doc.put(&note, PINNED, pinned)?;
+        self.touch(&note, now)
     }
 
     /// Remove a note entirely. Merges cleanly: a delete and a concurrent edit
@@ -423,19 +459,39 @@ impl NoteStore {
             text: self.doc.text(&text_obj)?,
             tags: self.keys_of(&note, TAGS)?,
             attachments: self.entries_of(&note, ATTACHMENTS)?,
+            pinned: self.bool_field(&note, PINNED)?,
+            trashed: self.bool_field(&note, TRASHED)?,
             created: self.int_field(&note, CREATED)?,
             updated: self.int_field(&note, UPDATED)?,
         }))
     }
 
-    /// Metadata for every note, unordered.
+    /// Metadata for every active (non-trashed) note, unordered.
     pub fn list(&self) -> Result<Vec<NoteMeta>, ModelError> {
         let mut out = Vec::new();
         for id_str in self.doc.keys(ROOT) {
             if is_folder_key(&id_str) {
                 continue;
             }
-            out.push(self.meta_of(&id_str)?);
+            let meta = self.meta_of(&id_str)?;
+            if !meta.trashed {
+                out.push(meta);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Metadata for every trashed note (the Trash view).
+    pub fn list_trashed(&self) -> Result<Vec<NoteMeta>, ModelError> {
+        let mut out = Vec::new();
+        for id_str in self.doc.keys(ROOT) {
+            if is_folder_key(&id_str) {
+                continue;
+            }
+            let meta = self.meta_of(&id_str)?;
+            if meta.trashed {
+                out.push(meta);
+            }
         }
         Ok(out)
     }
@@ -505,7 +561,10 @@ impl NoteStore {
             let text_obj = self.text_obj(&note)?;
             let body = self.doc.text(&text_obj)?;
             if title.to_lowercase().contains(&needle) || body.to_lowercase().contains(&needle) {
-                out.push(self.meta_of(&id_str)?);
+                let meta = self.meta_of(&id_str)?;
+                if !meta.trashed {
+                    out.push(meta);
+                }
             }
         }
         Ok(out)
@@ -596,6 +655,14 @@ impl NoteStore {
             .unwrap_or_default())
     }
 
+    fn bool_field(&self, obj: &ObjId, key: &str) -> Result<bool, ModelError> {
+        Ok(self
+            .doc
+            .get(obj, key)?
+            .and_then(|(v, _)| v.to_bool())
+            .unwrap_or(false))
+    }
+
     fn keys_of(&self, note: &ObjId, key: &str) -> Result<Vec<String>, ModelError> {
         match self.child_object(note, key)? {
             Some(map) => {
@@ -632,6 +699,8 @@ impl NoteStore {
             title: self.str_field(&note, TITLE)?,
             folder: self.str_field(&note, FOLDER)?,
             tags: self.keys_of(&note, TAGS)?,
+            pinned: self.bool_field(&note, PINNED)?,
+            trashed: self.bool_field(&note, TRASHED)?,
             created: self.int_field(&note, CREATED)?,
             updated: self.int_field(&note, UPDATED)?,
         })
@@ -786,6 +855,35 @@ mod tests {
         s.replace_text(&id, "hello world", 2).unwrap();
         s.splice_text(&id, 5, 0, ",", 3).unwrap(); // "hello, world"
         assert_eq!(s.get_note(&id).unwrap().unwrap().text, "hello, world");
+    }
+
+    #[test]
+    fn trash_hides_restores_and_purges() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(1).unwrap();
+        assert_eq!(s.list().unwrap().len(), 1);
+
+        s.trash_note(&id, 2).unwrap();
+        assert_eq!(s.list().unwrap().len(), 0);
+        assert_eq!(s.list_trashed().unwrap().len(), 1);
+        assert!(s.get_note(&id).unwrap().unwrap().trashed);
+
+        s.restore_note(&id, 3).unwrap();
+        assert_eq!(s.list().unwrap().len(), 1);
+        assert!(s.list_trashed().unwrap().is_empty());
+
+        s.delete_note(&id).unwrap(); // purge
+        assert!(s.get_note(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn pin_flag_round_trips() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(1).unwrap();
+        assert!(!s.get_note(&id).unwrap().unwrap().pinned);
+        s.set_pinned(&id, true, 2).unwrap();
+        assert!(s.get_note(&id).unwrap().unwrap().pinned);
+        assert!(s.list().unwrap()[0].pinned);
     }
 
     #[test]
