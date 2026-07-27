@@ -2,6 +2,7 @@ package dev.plainnote.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -11,6 +12,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -20,10 +24,14 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,8 +58,32 @@ fun NotesScreen(vm: NotesViewModel) {
 @Composable
 private fun NoteListScreen(vm: NotesViewModel) {
     val notes by vm.notes.collectAsState()
+    val status by vm.status.collectAsState()
+    val snackbar = remember { SnackbarHostState() }
+    var showPairing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(status) {
+        status?.let {
+            snackbar.showSnackbar(it)
+            vm.clearStatus()
+        }
+    }
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Plain Note") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Plain Note") },
+                actions = {
+                    IconButton(onClick = { vm.sync() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Synchroniser")
+                    }
+                    IconButton(onClick = { showPairing = true }) {
+                        Icon(Icons.Filled.Link, contentDescription = "Associer")
+                    }
+                },
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
             FloatingActionButton(onClick = { vm.createAndOpen() }) {
                 Icon(Icons.Filled.Add, contentDescription = "Nouvelle note")
@@ -70,9 +102,7 @@ private fun NoteListScreen(vm: NotesViewModel) {
             LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 items(notes, key = { it.id }) { note ->
                     ListItem(
-                        headlineContent = {
-                            Text(note.title.ifEmpty { "(sans titre)" })
-                        },
+                        headlineContent = { Text(note.title.ifEmpty { "(sans titre)" }) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { vm.open(note.id) },
@@ -82,6 +112,46 @@ private fun NoteListScreen(vm: NotesViewModel) {
             }
         }
     }
+
+    if (showPairing) {
+        PairingDialog(
+            onDismiss = { showPairing = false },
+            onPair = { blob ->
+                showPairing = false
+                vm.pair(blob)
+            },
+        )
+    }
+}
+
+/**
+ * Minimal pairing dialog: paste the pairing blob. A QR scanner (CameraX + ML
+ * Kit) replacing the text field is the planned follow-up.
+ */
+@Composable
+private fun PairingDialog(onDismiss: () -> Unit, onPair: (String) -> Unit) {
+    var blob by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Associer l'appareil") },
+        text = {
+            OutlinedTextField(
+                value = blob,
+                onValueChange = { blob = it },
+                label = { Text("Code d'appairage") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onPair(blob.trim()) },
+                enabled = blob.isNotBlank(),
+            ) { Text("Associer") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Annuler") }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -107,9 +177,7 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
             )
         },
     ) { padding ->
-        androidx.compose.foundation.layout.Column(
-            Modifier.fillMaxSize().padding(padding).padding(16.dp),
-        ) {
+        Column(Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
             OutlinedTextField(
                 value = title,
                 onValueChange = {
