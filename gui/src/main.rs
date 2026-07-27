@@ -555,9 +555,14 @@ fn walk(
     let mut subfolders: Vec<&note_core::FolderMeta> =
         folders.iter().filter(|f| f.parent == parent).collect();
     subfolders.sort_by(|a, b| a.name.cmp(&b.name));
+    let folder_parents: Vec<(&str, &str)> = folders
+        .iter()
+        .map(|f| (f.id.as_str(), f.parent.as_str()))
+        .collect();
+    let note_folders: Vec<&str> = notes.iter().map(|n| n.folder.as_str()).collect();
     for f in subfolders {
         let is_expanded = expanded.contains(f.id.as_str());
-        let count = notes.iter().filter(|n| n.folder == f.id.as_str()).count();
+        let count = subtree_note_count(f.id.as_str(), &folder_parents, &note_folders);
         ui.tree.append(&folder_row(
             ui,
             state,
@@ -729,6 +734,30 @@ fn md_to_pango(src: &str) -> String {
         }
     }
     out
+}
+
+/// Count notes in `folder_id` and all its descendant folders.
+///
+/// `folder_parents` is `(folder_id, parent_id)` for every folder; `note_folders`
+/// is the folder id each note lives in. Used for the sidebar folder counts so a
+/// folder holding only subfolders still reflects the notes nested under it.
+fn subtree_note_count(
+    folder_id: &str,
+    folder_parents: &[(&str, &str)],
+    note_folders: &[&str],
+) -> usize {
+    let mut subtree = vec![folder_id];
+    let mut i = 0;
+    while i < subtree.len() {
+        let cur = subtree[i];
+        for (id, parent) in folder_parents {
+            if *parent == cur && !subtree.contains(id) {
+                subtree.push(id);
+            }
+        }
+        i += 1;
+    }
+    note_folders.iter().filter(|f| subtree.contains(f)).count()
 }
 
 // --- Markdown formatting transforms (pure, unit-tested) ---
@@ -2124,7 +2153,30 @@ fn install_css() {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_text, md_to_pango, set_heading_line, toggle_line_prefix, wrap_or_unwrap};
+    use super::{
+        count_text, md_to_pango, set_heading_line, subtree_note_count, toggle_line_prefix,
+        wrap_or_unwrap,
+    };
+
+    #[test]
+    fn subtree_count_includes_descendants() {
+        // A contains B, B contains 2 notes; A directly contains none.
+        let folders = [("a", ""), ("b", "a")];
+        let note_folders = ["b", "b"];
+        // The bug: A used to show 0; it must now show 2 (its whole subtree).
+        assert_eq!(subtree_note_count("a", &folders, &note_folders), 2);
+        assert_eq!(subtree_note_count("b", &folders, &note_folders), 2);
+    }
+
+    #[test]
+    fn subtree_count_direct_and_nested() {
+        // a has 1 direct note + child b with 1 note + grandchild c with 1.
+        let folders = [("a", ""), ("b", "a"), ("c", "b")];
+        let note_folders = ["a", "b", "c"];
+        assert_eq!(subtree_note_count("a", &folders, &note_folders), 3);
+        assert_eq!(subtree_note_count("b", &folders, &note_folders), 2);
+        assert_eq!(subtree_note_count("c", &folders, &note_folders), 1);
+    }
 
     #[test]
     fn wrap_and_unwrap_toggles() {
