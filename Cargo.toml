@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["protocol", "core", "client", "cli", "relay", "gui"]
+members = ["protocol", "core", "client", "cli", "relay", "gui", "mobile"]
 
 [workspace.package]
 version = "0.1.0"
@@ -44,6 +44,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CRDT
 automerge = "0.5"
+
+# Mobile bindings (Android via UniFFI)
+uniffi = "0.28"
 
 # Crypto (AEAD + KDF + signatures)
 chacha20poly1305 = { version = "0.10", features = ["std"] }
