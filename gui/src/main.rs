@@ -23,13 +23,26 @@ enum RowKind {
     Trash,
 }
 
+/// An open editor tab, bound to one note. Each tab owns its own editor widgets
+/// and auto-save wiring, so several notes can be edited at once.
+#[derive(Clone)]
+struct Tab {
+    id: NoteId,
+    page: adw::TabPage,
+    title: gtk::Entry,
+    text_view: gtk::TextView,
+    buffer: gtk::TextBuffer,
+    tags_box: gtk::Box,
+}
+
 struct State {
     store: LocalStore,
     doc: NoteStore,
     rows: Vec<RowKind>,         // parallel to sidebar rows
     expanded: HashSet<String>,  // expanded folder ids
     sel_folder: Option<String>, // context folder for new note/folder
-    current: Option<NoteId>,
+    tabs: Vec<Tab>,             // open editor tabs
+    current: Option<NoteId>,    // note of the active tab
     query: String,
     trash_view: bool,
     loading: bool,
@@ -47,10 +60,7 @@ impl State {
 #[derive(Clone)]
 struct Ui {
     tree: gtk::ListBox,
-    title: gtk::Entry,
-    text_view: gtk::TextView,
-    buffer: gtk::TextBuffer,
-    tags_box: gtk::Box,
+    tab_view: adw::TabView,
     subtitle: adw::WindowTitle,
 }
 
@@ -79,6 +89,7 @@ fn build_ui(app: &adw::Application) {
         rows: Vec::new(),
         expanded: HashSet::new(),
         sel_folder: None,
+        tabs: Vec::new(),
         current: None,
         query: String::new(),
         trash_view: false,
@@ -123,55 +134,21 @@ fn build_ui(app: &adw::Application) {
     sidebar.add_top_bar(&sidebar_header);
     sidebar.set_content(Some(&sidebar_box));
 
-    // --- Editor ---
+    // --- Editor (tabbed) ---
     let subtitle = adw::WindowTitle::new("Plain Note", "");
     let content_header = adw::HeaderBar::new();
     content_header.set_title_widget(Some(&subtitle));
 
-    let title = gtk::Entry::builder().placeholder_text("Titre").build();
-    title.add_css_class("pn-title");
-    title.set_margin_top(14);
-    title.set_margin_start(18);
-    title.set_margin_end(18);
-
-    let tags_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let tag_entry = gtk::Entry::builder()
-        .placeholder_text("+ tag")
-        .max_width_chars(10)
+    let tab_view = adw::TabView::new();
+    let tab_bar = adw::TabBar::builder()
+        .view(&tab_view)
+        .autohide(false)
         .build();
-    tag_entry.add_css_class("flat");
-    let tags_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    tags_row.set_margin_start(18);
-    tags_row.set_margin_end(18);
-    tags_row.set_margin_top(8);
-    tags_row.append(&tags_box);
-    tags_row.append(&tag_entry);
-    let tags_scroll = gtk::ScrolledWindow::builder()
-        .child(&tags_row)
-        .vscrollbar_policy(gtk::PolicyType::Never)
-        .build();
-
-    let text_view = gtk::TextView::new();
-    text_view.set_monospace(true);
-    text_view.set_wrap_mode(gtk::WrapMode::WordChar);
-    text_view.set_left_margin(18);
-    text_view.set_right_margin(18);
-    text_view.set_top_margin(10);
-    text_view.set_bottom_margin(18);
-    let buffer = text_view.buffer();
-    let text_scroll = gtk::ScrolledWindow::builder()
-        .child(&text_view)
-        .vexpand(true)
-        .build();
-
-    let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    editor.append(&title);
-    editor.append(&tags_scroll);
-    editor.append(&text_scroll);
 
     let content = adw::ToolbarView::new();
     content.add_top_bar(&content_header);
-    content.set_content(Some(&editor));
+    content.add_top_bar(&tab_bar);
+    content.set_content(Some(&tab_view));
 
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar));
@@ -181,10 +158,7 @@ fn build_ui(app: &adw::Application) {
 
     let ui = Ui {
         tree: tree.clone(),
-        title: title.clone(),
-        text_view: text_view.clone(),
-        buffer: buffer.clone(),
-        tags_box,
+        tab_view: tab_view.clone(),
         subtitle,
     };
 
@@ -224,7 +198,7 @@ fn build_ui(app: &adw::Application) {
                         .flatten()
                         .map(|n| n.folder);
                     state.borrow_mut().sel_folder = folder;
-                    show_note_by_id(&ui, &state, &id);
+                    open_note(&ui, &state, &id);
                 }
                 Some(RowKind::Trash) => {
                     {
@@ -269,8 +243,10 @@ fn build_ui(app: &adw::Application) {
             };
             if let Some(id) = created {
                 rebuild_tree(&ui, &state);
-                select_note(&ui, &state, &id);
-                ui.title.grab_focus();
+                open_note(&ui, &state, &id);
+                if let Some(tab) = state.borrow().tabs.iter().find(|t| t.id == id) {
+                    tab.title.grab_focus();
+                }
             }
         });
     }
@@ -322,71 +298,36 @@ fn build_ui(app: &adw::Application) {
         });
     }
 
-    // Add tag.
+    // Tab switch -> update active note, subtitle and sidebar selection.
     {
         let ui = ui.clone();
         let state = state.clone();
-        tag_entry.connect_activate(move |entry| {
-            let tag = entry.text().to_string();
-            let tag = tag.trim().trim_start_matches('#');
-            let current = state.borrow().current.clone();
-            if tag.is_empty() {
-                return;
-            }
-            if let Some(id) = current {
-                {
-                    let mut st = state.borrow_mut();
-                    let _ = st.doc.add_tag(&id, tag, store::now_millis());
-                    st.persist();
-                }
-                entry.set_text("");
-                rebuild_tags(&ui, &state, &id);
+        tab_view.connect_selected_page_notify(move |tv| {
+            let id = tv.selected_page().and_then(|page| {
+                state
+                    .borrow()
+                    .tabs
+                    .iter()
+                    .find(|t| t.page == page)
+                    .map(|t| t.id.clone())
+            });
+            state.borrow_mut().current = id.clone();
+            if let Some(id) = id {
+                sync_header(&ui, &state, &id);
+                reselect_current(&ui, &state);
+            } else {
+                ui.subtitle.set_title("Plain Note");
+                ui.subtitle.set_subtitle("");
             }
         });
     }
 
-    // Title edits -> save + live-update the selected sidebar row.
-    {
-        let ui = ui.clone();
-        let state = state.clone();
-        title.connect_changed(move |entry| {
-            let (loading, current) = {
-                let st = state.borrow();
-                (st.loading, st.current.clone())
-            };
-            if loading {
-                return;
-            }
-            if let Some(id) = current {
-                {
-                    let mut st = state.borrow_mut();
-                    let _ = st.doc.set_title(&id, &entry.text(), store::now_millis());
-                    st.persist();
-                }
-                set_selected_row_title(&ui, &entry.text());
-            }
-        });
-    }
-
-    // Body edits -> save.
+    // Tab closed -> drop it from state (the note itself is untouched).
     {
         let state = state.clone();
-        buffer.connect_changed(move |buf| {
-            let (loading, current) = {
-                let st = state.borrow();
-                (st.loading, st.current.clone())
-            };
-            if loading {
-                return;
-            }
-            if let Some(id) = current {
-                let text = buf
-                    .text(&buf.start_iter(), &buf.end_iter(), false)
-                    .to_string();
-                let mut st = state.borrow_mut();
-                let _ = st.doc.replace_text(&id, &text, store::now_millis());
-                st.persist();
-            }
+        tab_view.connect_close_page(move |_, page| {
+            state.borrow_mut().tabs.retain(|t| &t.page != page);
+            glib::Propagation::Proceed
         });
     }
 
@@ -822,10 +763,211 @@ fn mutate(
     st.persist();
 }
 
-/// Update the title label of the currently selected row without rebuilding
-/// (so editing the title never disturbs the tree or the cursor).
-fn set_selected_row_title(ui: &Ui, text: &str) {
-    let Some(row) = ui.tree.selected_row() else {
+/// Open a note in a tab: focus its existing tab, or build a fresh editor pane.
+fn open_note(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
+    let existing = state
+        .borrow()
+        .tabs
+        .iter()
+        .find(|t| &t.id == id)
+        .map(|t| t.page.clone());
+    let page = match existing {
+        Some(page) => page,
+        None => {
+            let note = state.borrow().doc.get_note(id).ok().flatten();
+            let Some(note) = note else { return };
+            let tab = build_editor_pane(ui, state, &note);
+            let page = tab.page.clone();
+            state.borrow_mut().tabs.push(tab);
+            page
+        }
+    };
+    ui.tab_view.set_selected_page(&page);
+    state.borrow_mut().current = Some(id.clone());
+    sync_header(ui, state, id);
+    reselect_current(ui, state);
+}
+
+/// Build an editor pane for `note`, append it as a tab, and wire its auto-save.
+fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note) -> Tab {
+    let id = note.id.clone();
+
+    let title = gtk::Entry::builder().placeholder_text("Titre").build();
+    title.add_css_class("pn-title");
+    title.set_margin_top(14);
+    title.set_margin_start(18);
+    title.set_margin_end(18);
+
+    let tags_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let tag_entry = gtk::Entry::builder()
+        .placeholder_text("+ tag")
+        .max_width_chars(10)
+        .build();
+    tag_entry.add_css_class("flat");
+    let tags_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    tags_row.set_margin_start(18);
+    tags_row.set_margin_end(18);
+    tags_row.set_margin_top(8);
+    tags_row.append(&tags_box);
+    tags_row.append(&tag_entry);
+    let tags_scroll = gtk::ScrolledWindow::builder()
+        .child(&tags_row)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+
+    let text_view = gtk::TextView::new();
+    text_view.set_monospace(true);
+    text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    text_view.set_left_margin(18);
+    text_view.set_right_margin(18);
+    text_view.set_top_margin(10);
+    text_view.set_bottom_margin(18);
+    let buffer = text_view.buffer();
+    let text_scroll = gtk::ScrolledWindow::builder()
+        .child(&text_view)
+        .vexpand(true)
+        .build();
+
+    let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    editor.append(&title);
+    editor.append(&tags_scroll);
+    editor.append(&text_scroll);
+
+    // Seed content BEFORE connecting handlers so the initial load never writes
+    // back (which would bump the note's `updated` timestamp).
+    title.set_text(&note.title);
+    buffer.set_text(&note.text);
+
+    let page = ui.tab_view.append(&editor);
+    page.set_title(note_title(&note.title));
+
+    // Title edits -> save + update tab, sidebar row and (if active) the header.
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let page = page.clone();
+        title.connect_changed(move |entry| {
+            if state.borrow().loading {
+                return;
+            }
+            let text = entry.text().to_string();
+            {
+                let mut st = state.borrow_mut();
+                let _ = st.doc.set_title(&id, &text, store::now_millis());
+                st.persist();
+            }
+            page.set_title(note_title(&text));
+            set_row_title(&ui, &state, &id, &text);
+            if state.borrow().current.as_ref() == Some(&id) {
+                sync_header(&ui, &state, &id);
+            }
+        });
+    }
+
+    // Body edits -> save.
+    {
+        let state = state.clone();
+        let id = id.clone();
+        buffer.connect_changed(move |buf| {
+            if state.borrow().loading {
+                return;
+            }
+            let text = buf
+                .text(&buf.start_iter(), &buf.end_iter(), false)
+                .to_string();
+            let mut st = state.borrow_mut();
+            let _ = st.doc.replace_text(&id, &text, store::now_millis());
+            st.persist();
+        });
+    }
+
+    // Add tag on Enter.
+    {
+        let state = state.clone();
+        let id = id.clone();
+        let tags_box = tags_box.clone();
+        tag_entry.connect_activate(move |entry| {
+            let tag = entry.text().to_string();
+            let tag = tag.trim().trim_start_matches('#');
+            if tag.is_empty() {
+                return;
+            }
+            {
+                let mut st = state.borrow_mut();
+                let _ = st.doc.add_tag(&id, tag, store::now_millis());
+                st.persist();
+            }
+            entry.set_text("");
+            fill_tags(&state, &tags_box, &id);
+        });
+    }
+
+    let tab = Tab {
+        id: id.clone(),
+        page,
+        title,
+        text_view,
+        buffer,
+        tags_box: tags_box.clone(),
+    };
+    fill_tags(state, &tags_box, &id);
+    tab
+}
+
+/// Rebuild the tag chips of one editor pane from the note's current tags.
+fn fill_tags(state: &Rc<RefCell<State>>, tags_box: &gtk::Box, id: &NoteId) {
+    while let Some(child) = tags_box.first_child() {
+        tags_box.remove(&child);
+    }
+    let tags = {
+        let st = state.borrow();
+        st.doc
+            .get_note(id)
+            .ok()
+            .flatten()
+            .map(|n| n.tags)
+            .unwrap_or_default()
+    };
+    for tag in tags {
+        let chip = gtk::Button::with_label(&format!("#{tag}  ✕"));
+        chip.add_css_class("flat");
+        chip.add_css_class("pn-chip");
+        let state = state.clone();
+        let id = id.clone();
+        let box_for_cb = tags_box.clone();
+        let tag_name = tag.clone();
+        chip.connect_clicked(move |_| {
+            {
+                let mut st = state.borrow_mut();
+                let _ = st.doc.remove_tag(&id, &tag_name, store::now_millis());
+                st.persist();
+            }
+            fill_tags(&state, &box_for_cb, &id);
+        });
+        tags_box.append(&chip);
+    }
+}
+
+/// Update the header title/subtitle for the note shown in the active tab.
+fn sync_header(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
+    let note = state.borrow().doc.get_note(id).ok().flatten();
+    let Some(note) = note else { return };
+    let path = state
+        .borrow()
+        .doc
+        .folder_path(&note.folder)
+        .unwrap_or_default();
+    ui.subtitle.set_title(note_title(&note.title));
+    ui.subtitle.set_subtitle(&path);
+}
+
+/// Update the sidebar row label for `id` without rebuilding the tree.
+fn set_row_title(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId, text: &str) {
+    let Some(idx) = row_index_of(state, id) else {
+        return;
+    };
+    let Some(row) = ui.tree.row_at_index(idx as i32) else {
         return;
     };
     let Some(b) = row.child().and_downcast::<gtk::Box>() else {
@@ -843,26 +985,13 @@ fn set_selected_row_title(ui: &Ui, text: &str) {
     }
 }
 
-fn select_note(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
-    let idx = row_index_of(state, id);
-    if let Some(idx) = idx
+fn reselect_current(ui: &Ui, state: &Rc<RefCell<State>>) {
+    let cur = state.borrow().current.clone();
+    if let Some(id) = cur
+        && let Some(idx) = row_index_of(state, &id)
         && let Some(row) = ui.tree.row_at_index(idx as i32)
     {
         ui.tree.select_row(Some(&row));
-    }
-}
-
-fn reselect_current(ui: &Ui, state: &Rc<RefCell<State>>) {
-    let cur = state.borrow().current.clone();
-    if let Some(id) = cur {
-        let idx = row_index_of(state, &id);
-        if let Some(idx) = idx
-            && let Some(row) = ui.tree.row_at_index(idx as i32)
-        {
-            state.borrow_mut().loading = true;
-            ui.tree.select_row(Some(&row));
-            state.borrow_mut().loading = false;
-        }
     }
 }
 
@@ -872,62 +1001,6 @@ fn row_index_of(state: &Rc<RefCell<State>>, id: &NoteId) -> Option<usize> {
         .rows
         .iter()
         .position(|r| matches!(r, RowKind::Note(n) if n == id))
-}
-
-fn show_note_by_id(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
-    let note = state.borrow().doc.get_note(id).ok().flatten();
-    let Some(note) = note else {
-        return;
-    };
-    {
-        let mut st = state.borrow_mut();
-        st.loading = true;
-        st.current = Some(note.id.clone());
-    }
-    ui.title.set_text(&note.title);
-    ui.buffer.set_text(&note.text);
-    let path = state
-        .borrow()
-        .doc
-        .folder_path(&note.folder)
-        .unwrap_or_default();
-    ui.subtitle.set_title(note_title(&note.title));
-    ui.subtitle.set_subtitle(&path);
-    state.borrow_mut().loading = false;
-    rebuild_tags(ui, state, &note.id);
-}
-
-fn rebuild_tags(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
-    while let Some(child) = ui.tags_box.first_child() {
-        ui.tags_box.remove(&child);
-    }
-    let tags = {
-        let st = state.borrow();
-        st.doc
-            .get_note(id)
-            .ok()
-            .flatten()
-            .map(|n| n.tags)
-            .unwrap_or_default()
-    };
-    for tag in tags {
-        let chip = gtk::Button::with_label(&format!("#{tag}  ✕"));
-        chip.add_css_class("flat");
-        chip.add_css_class("pn-chip");
-        let ui2 = ui.clone();
-        let state = state.clone();
-        let id = id.clone();
-        let tag_name = tag.clone();
-        chip.connect_clicked(move |_| {
-            {
-                let mut st = state.borrow_mut();
-                let _ = st.doc.remove_tag(&id, &tag_name, store::now_millis());
-                st.persist();
-            }
-            rebuild_tags(&ui2, &state, &id);
-        });
-        ui.tags_box.append(&chip);
-    }
 }
 
 fn start_auto_sync(ui: &Ui, state: &Rc<RefCell<State>>, label: &gtk::Label) {
@@ -983,15 +1056,52 @@ fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
     if sig == state.borrow().last_sig {
         return;
     }
-    let editing = ui.title.has_focus() || ui.text_view.has_focus();
     {
         let mut st = state.borrow_mut();
         st.doc = doc;
         st.last_sig = sig;
     }
+
+    // Refresh every open tab from the reloaded doc. Skip a tab being edited so
+    // remote changes never yank text from under the cursor; close a tab whose
+    // note has disappeared.
+    let tabs = state.borrow().tabs.clone();
+    let mut editing = false;
+    for tab in &tabs {
+        let note = state.borrow().doc.get_note(&tab.id).ok().flatten();
+        let Some(note) = note else {
+            ui.tab_view.close_page(&tab.page);
+            continue;
+        };
+        if tab.title.has_focus() || tab.text_view.has_focus() {
+            editing = true;
+            continue;
+        }
+        let cur_title = tab.title.text().to_string();
+        let cur_body = tab
+            .buffer
+            .text(&tab.buffer.start_iter(), &tab.buffer.end_iter(), false)
+            .to_string();
+        if cur_title != note.title || cur_body != note.text {
+            state.borrow_mut().loading = true;
+            if cur_title != note.title {
+                tab.title.set_text(&note.title);
+            }
+            if cur_body != note.text {
+                tab.buffer.set_text(&note.text);
+            }
+            state.borrow_mut().loading = false;
+        }
+        tab.page.set_title(note_title(&note.title));
+        fill_tags(state, &tab.tags_box, &tab.id);
+    }
+
     rebuild_tree(ui, state);
     if !editing {
         reselect_current(ui, state);
+    }
+    if let Some(id) = state.borrow().current.clone() {
+        sync_header(ui, state, &id);
     }
 }
 
