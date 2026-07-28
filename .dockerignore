@@ -1,6 +1,0 @@
-# Keep the build context small; the relay image only needs the Rust sources.
-target/
-.git/
-android/
-docs/
-**/*.md
