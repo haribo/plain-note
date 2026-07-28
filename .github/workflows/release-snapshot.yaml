@@ -1,13 +1,12 @@
 name: release-snapshot
 
 # Manually-triggered unstable build from develop. NOT a versioned release —
-# see docs/release.md. Publishes a rolling `snapshot` pre-release + relay image.
+# see docs/release.md. Publishes a rolling `snapshot` pre-release of binaries.
 on:
   workflow_dispatch:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   binaries:
@@ -50,33 +49,3 @@ jobs:
             --title "Snapshot $STAMP" \
             --notes "Unstable build from develop (\`$STAMP\`). **Not a versioned release.** Linux x86_64. The GUI binary needs GTK 4 + libadwaita installed at runtime. No Android build." \
             dist/*
-
-  image:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: develop
-
-      - name: Compute build stamp
-        id: stamp
-        run: echo "info=develop-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and push relay image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: relay/Dockerfile
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/pn-relay:snapshot
-          build-args: |
-            PN_BUILD_INFO=${{ steps.stamp.outputs.info }}

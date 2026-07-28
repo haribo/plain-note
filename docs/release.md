@@ -22,26 +22,16 @@ It builds from `develop` and:
 - stamps the build (`PN_BUILD_INFO=develop-<date>-<sha7>`), visible in
   `pn --version` and the relay startup log;
 - publishes Linux x86_64 binaries — `pn`, `pn-relay`, `plain-note-gui` — as a
-  GitHub **pre-release** under the rolling `snapshot` tag (overwritten each run);
-- builds and pushes the relay image to `ghcr.io/<owner>/pn-relay:snapshot`.
+  GitHub **pre-release** under the rolling `snapshot` tag (overwritten each run).
 
 Notes:
 
 - The `plain-note-gui` binary needs GTK 4 + libadwaita installed at runtime.
 - **Android is not built** (no CI toolchain).
-- The GHCR package starts private; make it public in the repo's package settings
-  if self-hosters should pull it anonymously.
 
-## Relay image
+## Deployment
 
-The image is a **release artifact**, not a hosted service. Run it yourself:
-
-```sh
-docker run -d --name pn-relay \
-  -e PN_RELAY_ADMIN_TOKEN=<secret> \
-  -v pn-relay-data:/data \
-  -p 8787:8787 \
-  ghcr.io/<owner>/pn-relay:snapshot
-```
-
-The relay serves plain HTTP; terminate TLS with a reverse proxy for internet use.
+The project ships **binaries only**. Deployment — running the `pn-relay` binary,
+containerizing it, TLS termination, service supervision — is the responsibility
+of whoever self-hosts. See the relay's environment configuration in the top-level
+`README.md`.
