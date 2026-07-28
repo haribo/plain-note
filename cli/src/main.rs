@@ -15,7 +15,7 @@ const SHORT_ID: usize = 8;
 #[derive(Parser)]
 #[command(
     name = "pn",
-    version,
+    version = env!("PN_VERSION"),
     about = "Plain Note — local-first encrypted notes"
 )]
 struct Cli {

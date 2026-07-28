@@ -36,10 +36,7 @@ async fn main() -> Result<()> {
     let state = AppState::new(storage, admin_token);
 
     let listener = TcpListener::bind(&bind).await?;
-    tracing::info!(
-        "note-relay {} listening on {bind}",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing::info!("note-relay {} listening on {bind}", env!("PN_VERSION"));
     axum::serve(listener, build_app(state)).await?;
     Ok(())
 }
