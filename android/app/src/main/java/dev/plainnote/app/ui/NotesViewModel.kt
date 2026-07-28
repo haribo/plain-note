@@ -32,18 +32,35 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
+    /** Report a facade failure without crashing the app. */
+    private fun report(e: Exception) {
+        _status.value = "Erreur : ${e.message}"
+    }
+
     fun refresh() = viewModelScope.launch(Dispatchers.IO) {
-        _notes.value = repo.listNotes()
+        try {
+            _notes.value = repo.listNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
     }
 
     fun createAndOpen() = viewModelScope.launch(Dispatchers.IO) {
-        val id = repo.createNote()
-        _editing.value = repo.getNote(id)
-        _notes.value = repo.listNotes()
+        try {
+            val id = repo.createNote()
+            _editing.value = repo.getNote(id)
+            _notes.value = repo.listNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
     }
 
     fun open(id: String) = viewModelScope.launch(Dispatchers.IO) {
-        _editing.value = repo.getNote(id)
+        try {
+            _editing.value = repo.getNote(id)
+        } catch (e: Exception) {
+            report(e)
+        }
     }
 
     fun close() {
@@ -52,17 +69,29 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun saveTitle(id: String, title: String) = viewModelScope.launch(Dispatchers.IO) {
-        repo.setTitle(id, title)
+        try {
+            repo.setTitle(id, title)
+        } catch (e: Exception) {
+            report(e)
+        }
     }
 
     fun saveBody(id: String, text: String) = viewModelScope.launch(Dispatchers.IO) {
-        repo.setBody(id, text)
+        try {
+            repo.setBody(id, text)
+        } catch (e: Exception) {
+            report(e)
+        }
     }
 
     fun delete(id: String) = viewModelScope.launch(Dispatchers.IO) {
-        repo.delete(id)
-        _editing.value = null
-        _notes.value = repo.listNotes()
+        try {
+            repo.delete(id)
+            _editing.value = null
+            _notes.value = repo.listNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
     }
 
     fun sync() = viewModelScope.launch(Dispatchers.IO) {
