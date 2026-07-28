@@ -17,6 +17,7 @@ plugins {
 android {
     namespace = "dev.plainnote.app"
     compileSdk = 34
+    ndkVersion = "26.3.11579264"
 
     defaultConfig {
         applicationId = "dev.plainnote.app"
@@ -53,8 +54,13 @@ android {
 cargo {
     module = "../../mobile"
     libname = "plain_note_mobile"
-    targets = listOf("arm64", "x86_64", "arm", "x86")
+    // arm64 = modern devices, x86_64 = emulator. Add "arm"/"x86" for 32-bit later.
+    targets = listOf("arm64", "x86_64")
     profile = "release"
+    // The crate is part of a Cargo workspace, so its build output lands in the
+    // workspace target dir (repo/target), not mobile/target. Point the plugin
+    // there so it copies the built .so into rustJniLibs.
+    targetDirectory = rootProject.projectDir.parentFile.resolve("target").absolutePath
 }
 
 // Generate the Kotlin bindings by reading the metadata baked into one built .so.
@@ -67,7 +73,7 @@ val generateUniFFIBindings by tasks.registering(Exec::class) {
         "--bin", "uniffi-bindgen", "--",
         "generate",
         "--library",
-        "android/app/build/rustJniLibs/android/arm64-v8a/libplain_note_mobile.so",
+        "target/aarch64-linux-android/release/libplain_note_mobile.so",
         "--config", "mobile/uniffi.toml",
         "--language", "kotlin",
         "--out-dir", layout.buildDirectory.dir("generated/uniffi").get().asFile.absolutePath,

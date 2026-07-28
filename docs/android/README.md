@@ -5,29 +5,36 @@ through the `plain-note-mobile` UniFFI facade (see
 `docs/design/mobile-bindings.md`). Kotlin holds UI only; all note logic lives in
 Rust.
 
-> **Status: unverified scaffolding.** This project was authored without an
-> Android toolchain and has **not been compiled or run**. Expect to finalize
-> version pins and the Gradle wrapper on first import into Android Studio.
+> **Status: builds a debug APK.** `./gradlew :app:assembleDebug` produces an APK
+> that bundles the Rust `libplain_note_mobile.so` (arm64-v8a + x86_64) and the
+> generated UniFFI bindings. The **runtime UI** still needs validation on a real
+> device or emulator.
 
 ## Prerequisites
 
-- Android Studio (Koala or newer) with the Android SDK (API 34) and **NDK**.
-- Rust toolchain with the Android targets:
+- Android SDK (API 34), build-tools 34, and **NDK 26.3.11579264** (matched by
+  `ndkVersion` in `app/build.gradle.kts`). Android Studio, or the command-line
+  tools + `sdkmanager`.
+- A JDK **17** (Gradle 8.9 / AGP 8.5 do not support very new JDKs).
+- A **rustup**-managed Rust toolchain with the Android targets (the system/distro
+  Rust cannot add cross targets):
   ```sh
-  rustup target add aarch64-linux-android x86_64-linux-android \
-      armv7-linux-androideabi i686-linux-android
+  rustup target add aarch64-linux-android x86_64-linux-android
   ```
-- The `rust-android-gradle` plugin invokes `cargo` directly; no `cargo-ndk` is
-  required, but `ANDROID_NDK_HOME` (or `ndk.dir`) must point at the installed
-  NDK.
+- `sdk.dir` in `android/local.properties` (git-ignored), and `ANDROID_NDK_HOME`
+  pointing at the installed NDK for the `rust-android-gradle` plugin.
+
+Add `armv7-linux-androideabi` / `i686-linux-android` (and the matching entries in
+the `cargo { targets = ... }` block) to also ship 32-bit ABIs.
 
 ## How it fits together
 
 1. `rust-android-gradle` cross-compiles the workspace `mobile` crate to
-   `libplain_note_mobile.so` for each ABI (task `cargoBuild`), placing them under
-   `app/build/rustJniLibs/android/<abi>/` so they ship in the APK.
+   `libplain_note_mobile.so` for each ABI (task `cargoBuild`). Because the crate
+   lives in a Cargo workspace, `cargo.targetDirectory` points the plugin at the
+   workspace `target/` so it copies the libraries into the APK's jniLibs.
 2. The `generateUniFFIBindings` task runs the `uniffi-bindgen` binary
-   (`mobile`, feature `bindgen`) against one built `.so` to emit the Kotlin
+   (`mobile`, feature `bindgen`) against the built arm64 `.so` to emit the Kotlin
    bindings (`dev.plainnote.core`) into `app/build/generated/uniffi/`, which is
    added to the main source set.
 3. The Compose app calls the generated `NoteApp` through
@@ -35,23 +42,15 @@ Rust.
 
 ## Build
 
-From `android/` after generating the Gradle wrapper (Android Studio does this on
-import, or run `gradle wrapper`):
+From `android/` (the Gradle wrapper is committed):
 
 ```sh
 ./gradlew :app:assembleDebug
 ```
 
-The store file is created in the app's private `filesDir`
-(`plain-note/store.automerge`).
-
-## Known gaps to validate
-
-- Version pins in `build.gradle.kts` / `app/build.gradle.kts` (AGP, Kotlin,
-  Compose BOM, plugin) — align with what your Android Studio provides.
-- Task ordering between `cargoBuild`, `generateUniFFIBindings`, and Kotlin
-  compilation.
-- The Gradle wrapper jar is not committed; generate it on import.
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. Install it on
+a device with `adb install -r <apk>`. The store file is created in the app's
+private `filesDir` (`plain-note/store.automerge`).
 
 ## Sync & pairing
 
