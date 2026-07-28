@@ -135,7 +135,9 @@ impl NoteApp {
     #[uniffi::constructor]
     pub fn new(store_path: String, config_path: String) -> Arc<Self> {
         Arc::new(Self {
-            store: LocalStore::new(store_path),
+            // Single-process store: Android has no working `flock`; the store's
+            // in-process mutex serializes the ViewModel's concurrent IO calls.
+            store: LocalStore::new_single_process(store_path),
             config_path: PathBuf::from(config_path),
         })
     }
