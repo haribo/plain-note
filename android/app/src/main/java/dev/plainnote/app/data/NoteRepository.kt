@@ -38,6 +38,12 @@ class NoteRepository(context: Context) {
 
     fun moveNote(id: String, folder: String?) = app.moveNote(id, folder)
 
+    fun setPinned(id: String, pinned: Boolean) = app.setPinned(id, pinned)
+
+    fun addTag(id: String, tag: String) = app.addTag(id, tag)
+
+    fun trash(id: String) = app.trash(id)
+
     fun getNote(id: String): NoteContent = app.getNote(id)
 
     fun setTitle(id: String, title: String) = app.setTitle(id, title)
