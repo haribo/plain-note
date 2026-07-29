@@ -63,6 +63,42 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setPinned(id: String, pinned: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.setPinned(id, pinned)
+            reloadNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun moveNote(id: String, folder: String?) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.moveNote(id, folder)
+            reloadNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun addTag(id: String, tag: String) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.addTag(id, tag.trim())
+            reloadNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun trashNote(id: String) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.trash(id)
+            reloadNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
     fun createFolder(name: String) = viewModelScope.launch(Dispatchers.IO) {
         try {
             repo.createFolder(name.trim())

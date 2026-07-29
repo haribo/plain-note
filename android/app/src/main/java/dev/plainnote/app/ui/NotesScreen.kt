@@ -1,6 +1,8 @@
 package dev.plainnote.app.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,7 +14,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PushPin
@@ -26,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
@@ -39,6 +44,8 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.DrawerValue
+import dev.plainnote.core.FolderInfo
+import dev.plainnote.core.NoteSummary
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -156,8 +163,12 @@ private fun NoteListScreen(vm: NotesViewModel, onMenu: () -> Unit) {
     val status by vm.status.collectAsState()
     val query by vm.query.collectAsState()
     val current by vm.currentFolder.collectAsState()
+    val folders by vm.folders.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     var showPairing by remember { mutableStateOf(false) }
+    var actionNote by remember { mutableStateOf<NoteSummary?>(null) }
+    var moveNote by remember { mutableStateOf<NoteSummary?>(null) }
+    var tagNote by remember { mutableStateOf<NoteSummary?>(null) }
 
     LaunchedEffect(status) {
         status?.let {
@@ -210,33 +221,50 @@ private fun NoteListScreen(vm: NotesViewModel, onMenu: () -> Unit) {
                     )
                 }
             } else {
+                val pinned = notes.filter { it.pinned }
+                val others = notes.filter { !it.pinned }
                 LazyColumn(Modifier.fillMaxSize()) {
-                    items(notes, key = { it.id }) { note ->
-                        val meta = buildList {
-                            vm.folderName(note.folder)?.let { add(it) }
-                            addAll(note.tags.map { "#$it" })
+                    if (pinned.isNotEmpty()) {
+                        item { SectionHeader("Épinglées") }
+                        items(pinned, key = { it.id }) { note ->
+                            NoteRow(note, vm.folderName(note.folder), { vm.open(note.id) }) { actionNote = note }
                         }
-                        ListItem(
-                            headlineContent = { Text(note.title.ifEmpty { "(sans titre)" }) },
-                            supportingContent = {
-                                if (meta.isNotEmpty()) Text(meta.joinToString("   "), maxLines = 1)
-                            },
-                            trailingContent = {
-                                if (note.pinned) {
-                                    Icon(
-                                        Icons.Filled.PushPin,
-                                        contentDescription = "Épinglée",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                    )
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().clickable { vm.open(note.id) },
-                        )
-                        HorizontalDivider()
+                    }
+                    if (others.isNotEmpty()) {
+                        if (pinned.isNotEmpty()) item { SectionHeader("Notes") }
+                        items(others, key = { it.id }) { note ->
+                            NoteRow(note, vm.folderName(note.folder), { vm.open(note.id) }) { actionNote = note }
+                        }
                     }
                 }
             }
         }
+    }
+
+    actionNote?.let { note ->
+        NoteActionsSheet(
+            note = note,
+            onDismiss = { actionNote = null },
+            onPin = { vm.setPinned(note.id, !note.pinned); actionNote = null },
+            onMove = { actionNote = null; moveNote = note },
+            onTag = { actionNote = null; tagNote = note },
+            onTrash = { vm.trashNote(note.id); actionNote = null },
+        )
+    }
+
+    moveNote?.let { note ->
+        MoveDialog(
+            folders = folders,
+            onDismiss = { moveNote = null },
+            onMove = { folderId -> vm.moveNote(note.id, folderId); moveNote = null },
+        )
+    }
+
+    tagNote?.let { note ->
+        TagDialog(
+            onDismiss = { tagNote = null },
+            onAdd = { tag -> vm.addTag(note.id, tag); tagNote = null },
+        )
     }
 
     if (showPairing) {
@@ -248,6 +276,145 @@ private fun NoteListScreen(vm: NotesViewModel, onMenu: () -> Unit) {
             },
         )
     }
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(16.dp, 12.dp, 16.dp, 4.dp),
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NoteRow(
+    note: NoteSummary,
+    folderName: String?,
+    onOpen: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val meta = buildList {
+        folderName?.let { add(it) }
+        addAll(note.tags.map { "#$it" })
+    }
+    ListItem(
+        headlineContent = { Text(note.title.ifEmpty { "(sans titre)" }) },
+        supportingContent = {
+            if (meta.isNotEmpty()) Text(meta.joinToString("   "), maxLines = 1)
+        },
+        trailingContent = {
+            if (note.pinned) {
+                Icon(
+                    Icons.Filled.PushPin,
+                    contentDescription = "Épinglée",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        },
+        modifier = Modifier.fillMaxWidth().combinedClickable(
+            onClick = onOpen,
+            onLongClick = onLongPress,
+        ),
+    )
+    HorizontalDivider()
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NoteActionsSheet(
+    note: NoteSummary,
+    onDismiss: () -> Unit,
+    onPin: () -> Unit,
+    onMove: () -> Unit,
+    onTag: () -> Unit,
+    onTrash: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Text(
+            note.title.ifEmpty { "(sans titre)" },
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(24.dp, 4.dp, 24.dp, 12.dp),
+        )
+        SheetAction(Icons.Filled.PushPin, if (note.pinned) "Désépingler" else "Épingler", onPin)
+        SheetAction(Icons.Filled.DriveFileMove, "Déplacer vers…", onMove)
+        SheetAction(Icons.Filled.Label, "Ajouter un tag", onTag)
+        SheetAction(
+            Icons.Filled.Delete,
+            "Mettre à la corbeille",
+            onTrash,
+            tint = MaterialTheme.colorScheme.error,
+        )
+        Box(Modifier.padding(bottom = 24.dp))
+    }
+}
+
+@Composable
+private fun SheetAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+) {
+    ListItem(
+        headlineContent = { Text(label, color = tint) },
+        leadingContent = { Icon(icon, contentDescription = null, tint = tint) },
+        modifier = Modifier.fillMaxWidth().clickable { onClick() },
+    )
+}
+
+@Composable
+private fun MoveDialog(
+    folders: List<FolderInfo>,
+    onDismiss: () -> Unit,
+    onMove: (String?) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Déplacer vers") },
+        text = {
+            Column {
+                ListItem(
+                    headlineContent = { Text("Racine") },
+                    modifier = Modifier.fillMaxWidth().clickable { onMove(null) },
+                )
+                folders.forEach { f ->
+                    ListItem(
+                        headlineContent = { Text(f.path) },
+                        modifier = Modifier.fillMaxWidth().clickable { onMove(f.id) },
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } },
+    )
+}
+
+@Composable
+private fun TagDialog(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
+    var tag by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ajouter un tag") },
+        text = {
+            OutlinedTextField(
+                value = tag,
+                onValueChange = { tag = it },
+                label = { Text("Tag") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onAdd(tag.trim()) }, enabled = tag.isNotBlank()) {
+                Text("Ajouter")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } },
+    )
 }
 
 @Composable
