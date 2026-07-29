@@ -18,8 +18,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
@@ -461,6 +463,7 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
     var body by remember(note.id) { mutableStateOf(TextFieldValue(note.text)) }
     var tags by remember(note.id) { mutableStateOf(note.tags) }
     var preview by remember(note.id) { mutableStateOf(false) }
+    var visual by remember(note.id) { mutableStateOf(false) }
     var showTag by remember(note.id) { mutableStateOf(false) }
 
     Scaffold(
@@ -473,11 +476,20 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                     }
                 },
                 actions = {
-                    IconButton(onClick = { preview = !preview }) {
+                    // Experimental visual (WYSIWYG) editor vs raw Markdown.
+                    IconButton(onClick = { visual = !visual }) {
                         Icon(
-                            if (preview) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                            contentDescription = "Aperçu",
+                            if (visual) Icons.Filled.Code else Icons.AutoMirrored.Filled.Article,
+                            contentDescription = "Éditeur visuel / Markdown",
                         )
+                    }
+                    if (!visual) {
+                        IconButton(onClick = { preview = !preview }) {
+                            Icon(
+                                if (preview) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = "Aperçu",
+                            )
+                        }
                     }
                     IconButton(onClick = { vm.delete(note.id) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Supprimer")
@@ -509,7 +521,15 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                 modifier = Modifier.fillMaxWidth().padding(16.dp, 0.dp),
             )
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (preview) {
+                if (visual) {
+                    VisualEditor(
+                        initialMarkdown = body.text,
+                        onBodyChange = { md ->
+                            body = TextFieldValue(md)
+                            vm.saveBody(note.id, md)
+                        },
+                    )
+                } else if (preview) {
                     Text(
                         Markdown.render(body.text),
                         modifier = Modifier
@@ -529,7 +549,7 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                     )
                 }
             }
-            if (!preview) {
+            if (!preview && !visual) {
                 FormatToolbar(body) { v ->
                     body = v
                     vm.saveBody(note.id, v.text)
