@@ -3,16 +3,23 @@ package dev.plainnote.app.ui
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
@@ -22,12 +29,16 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -38,12 +49,15 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.DrawerValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.input.TextFieldValue
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteSummary
 import androidx.compose.runtime.Composable
@@ -444,7 +458,10 @@ private fun PairingDialog(onDismiss: () -> Unit, onPair: (String) -> Unit) {
 @Composable
 private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
     var title by remember(note.id) { mutableStateOf(note.title) }
-    var body by remember(note.id) { mutableStateOf(note.text) }
+    var body by remember(note.id) { mutableStateOf(TextFieldValue(note.text)) }
+    var tags by remember(note.id) { mutableStateOf(note.tags) }
+    var preview by remember(note.id) { mutableStateOf(false) }
+    var showTag by remember(note.id) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -456,6 +473,12 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { preview = !preview }) {
+                        Icon(
+                            if (preview) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = "Aperçu",
+                        )
+                    }
                     IconButton(onClick = { vm.delete(note.id) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Supprimer")
                     }
@@ -463,7 +486,7 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
             )
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
+        Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
             OutlinedTextField(
                 value = title,
                 onValueChange = {
@@ -471,18 +494,106 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                     vm.saveTitle(note.id, it)
                 },
                 label = { Text("Titre") },
-                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(16.dp, 12.dp, 16.dp, 4.dp),
             )
-            TextField(
-                value = body,
-                onValueChange = {
-                    body = it
-                    vm.saveBody(note.id, it)
-                },
-                label = { Text("Contenu (Markdown)") },
-                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                modifier = Modifier.fillMaxSize().padding(top = 12.dp),
+            TagsRow(
+                tags = tags,
+                onRemove = { t -> tags = tags - t; vm.removeTag(note.id, t) },
+                onAdd = { showTag = true },
             )
+            Text(
+                Markdown.count(body.text),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(16.dp, 0.dp),
+            )
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (preview) {
+                    Text(
+                        Markdown.render(body.text),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(16.dp, 8.dp),
+                    )
+                } else {
+                    TextField(
+                        value = body,
+                        onValueChange = {
+                            body = it
+                            vm.saveBody(note.id, it.text)
+                        },
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+            if (!preview) {
+                FormatToolbar(body) { v ->
+                    body = v
+                    vm.saveBody(note.id, v.text)
+                }
+            }
         }
     }
+
+    if (showTag) {
+        TagDialog(
+            onDismiss = { showTag = false },
+            onAdd = { t -> tags = tags + t; vm.addTag(note.id, t); showTag = false },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TagsRow(tags: List<String>, onRemove: (String) -> Unit, onAdd: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(16.dp, 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        tags.forEach { t ->
+            InputChip(
+                selected = false,
+                onClick = {},
+                label = { Text("#$t") },
+                trailingIcon = {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Retirer",
+                        modifier = Modifier.clickable { onRemove(t) },
+                    )
+                },
+            )
+        }
+        AssistChip(onClick = onAdd, label = { Text("+ tag") })
+    }
+}
+
+@Composable
+private fun FormatToolbar(value: TextFieldValue, onChange: (TextFieldValue) -> Unit) {
+    Surface(tonalElevation = 2.dp) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FmtBtn("B") { onChange(Markdown.wrap(value, "**")) }
+            FmtBtn("I") { onChange(Markdown.wrap(value, "*")) }
+            FmtBtn("S") { onChange(Markdown.wrap(value, "~~")) }
+            FmtBtn("</>") { onChange(Markdown.wrap(value, "`")) }
+            FmtBtn("H1") { onChange(Markdown.heading(value, 1)) }
+            FmtBtn("H2") { onChange(Markdown.heading(value, 2)) }
+            FmtBtn("•") { onChange(Markdown.linePrefix(value, "- ")) }
+            FmtBtn("1.") { onChange(Markdown.linePrefix(value, "1. ")) }
+            FmtBtn("❝") { onChange(Markdown.linePrefix(value, "> ")) }
+            FmtBtn("🔗") { onChange(Markdown.link(value)) }
+        }
+    }
+}
+
+@Composable
+private fun FmtBtn(label: String, onClick: () -> Unit) {
+    TextButton(onClick = onClick) { Text(label) }
 }

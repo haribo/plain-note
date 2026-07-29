@@ -90,6 +90,15 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun removeTag(id: String, tag: String) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.removeTag(id, tag)
+            reloadNotes()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
     fun trashNote(id: String) = viewModelScope.launch(Dispatchers.IO) {
         try {
             repo.trash(id)

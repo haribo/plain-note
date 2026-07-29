@@ -42,6 +42,8 @@ class NoteRepository(context: Context) {
 
     fun addTag(id: String, tag: String) = app.addTag(id, tag)
 
+    fun removeTag(id: String, tag: String) = app.removeTag(id, tag)
+
     fun trash(id: String) = app.trash(id)
 
     fun getNote(id: String): NoteContent = app.getNote(id)
