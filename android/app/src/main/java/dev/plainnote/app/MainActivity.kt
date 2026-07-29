@@ -9,7 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import dev.plainnote.app.ui.NotesScreen
+import dev.plainnote.app.ui.AppRoot
 import dev.plainnote.app.ui.NotesViewModel
 
 class MainActivity : ComponentActivity() {
@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
             val colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
             MaterialTheme(colorScheme = colors) {
                 Surface {
-                    NotesScreen(vm)
+                    AppRoot(vm)
                 }
             }
         }
