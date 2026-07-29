@@ -17,6 +17,8 @@ use plain_note_client::{config, remote};
 
 uniffi::setup_scaffolding!();
 
+pub mod doc;
+
 /// A note as shown in a list: metadata only, no body.
 #[derive(Debug, uniffi::Record)]
 pub struct NoteSummary {
