@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -31,8 +30,6 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -462,7 +459,6 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
     var title by remember(note.id) { mutableStateOf(note.title) }
     var body by remember(note.id) { mutableStateOf(TextFieldValue(note.text)) }
     var tags by remember(note.id) { mutableStateOf(note.tags) }
-    var preview by remember(note.id) { mutableStateOf(false) }
     var visual by remember(note.id) { mutableStateOf(false) }
     var showTag by remember(note.id) { mutableStateOf(false) }
 
@@ -476,20 +472,12 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                     }
                 },
                 actions = {
-                    // Experimental visual (WYSIWYG) editor vs raw Markdown.
+                    // Two modes: visual (WYSIWYG, experimental) and raw Markdown.
                     IconButton(onClick = { visual = !visual }) {
                         Icon(
                             if (visual) Icons.Filled.Code else Icons.AutoMirrored.Filled.Article,
                             contentDescription = "Éditeur visuel / Markdown",
                         )
-                    }
-                    if (!visual) {
-                        IconButton(onClick = { preview = !preview }) {
-                            Icon(
-                                if (preview) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = "Aperçu",
-                            )
-                        }
                     }
                     IconButton(onClick = { vm.delete(note.id) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Supprimer")
@@ -529,14 +517,6 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                             vm.saveBody(note.id, md)
                         },
                     )
-                } else if (preview) {
-                    Text(
-                        Markdown.render(body.text),
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(16.dp, 8.dp),
-                    )
                 } else {
                     TextField(
                         value = body,
@@ -549,7 +529,7 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                     )
                 }
             }
-            if (!preview && !visual) {
+            if (!visual) {
                 FormatToolbar(body) { v ->
                     body = v
                     vm.saveBody(note.id, v.text)
