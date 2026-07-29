@@ -79,6 +79,9 @@ val generateUniFFIBindings by tasks.registering(Exec::class) {
         "--out-dir", layout.buildDirectory.dir("generated/uniffi").get().asFile.absolutePath,
     )
     outputs.dir(layout.buildDirectory.dir("generated/uniffi"))
+    // The built .so is not a declared input, so always regenerate — otherwise a
+    // changed model would compile against stale bindings.
+    outputs.upToDateWhen { false }
 }
 
 tasks.withType<KotlinCompile>().configureEach {
