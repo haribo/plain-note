@@ -1,6 +1,7 @@
 package dev.plainnote.app.data
 
 import android.content.Context
+import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteApp
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
@@ -24,9 +25,18 @@ class NoteRepository(context: Context) {
 
     // --- local ---
 
-    fun listNotes(): List<NoteSummary> = app.listNotes(null, null)
+    /** Notes in `folder` (null = all folders), pinned first. */
+    fun listNotes(folder: String? = null): List<NoteSummary> = app.listNotes(folder, null)
+
+    fun search(query: String): List<NoteSummary> = app.search(query)
+
+    fun listFolders(): List<FolderInfo> = app.listFolders()
+
+    fun createFolder(name: String): String = app.createFolder(name, null)
 
     fun createNote(): String = app.createNote()
+
+    fun moveNote(id: String, folder: String?) = app.moveNote(id, folder)
 
     fun getNote(id: String): NoteContent = app.getNote(id)
 
