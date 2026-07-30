@@ -1,41 +1,40 @@
 package dev.plainnote.app.ui
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,233 +48,239 @@ import dev.plainnote.core.docToMarkdown
 import dev.plainnote.core.markdownToDoc
 
 /**
- * SPIKE — experimental block-based visual editor over the core document model.
- * Edits `Doc` blocks and serializes back to Markdown. v0 flattens a block's
- * inline formatting to plain text on edit (marks dropped) — hence opt-in.
+ * Visual (WYSIWYG) editor over the core document model. Internally a flat list
+ * of lines (converted to/from the `Doc` on load/save); the format toolbar acts
+ * on the current line and Enter adds a line. Storage stays Markdown.
+ *
+ * v0 flattens inline marks to plain text on edit — a later increment restores
+ * non-destructive, displayed marks.
  */
 @Composable
 fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
-    var blocks by remember { mutableStateOf(markdownToDoc(initialMarkdown).blocks) }
+    var lines by remember { mutableStateOf(docToLines(markdownToDoc(initialMarkdown))) }
+    var focused by remember { mutableStateOf(0) }
+    var pendingFocus by remember { mutableStateOf<Int?>(null) }
+    val focusRequester = remember { FocusRequester() }
 
-    fun commit(newBlocks: List<Block>) {
-        blocks = newBlocks
-        onBodyChange(docToMarkdown(Doc(newBlocks)))
-    }
-    fun replace(index: Int, block: Block) =
-        commit(blocks.toMutableList().also { it[index] = block })
-    fun delete(index: Int) =
-        commit(blocks.toMutableList().also { it.removeAt(index) })
-    fun addParagraph() =
-        commit(blocks + Block.Paragraph(plainRun("")))
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp, 8.dp)) {
-        blocks.forEachIndexed { index, block ->
-            BlockRow(
-                block = block,
-                onChange = { replace(index, it) },
-                onSetType = { replace(index, changeType(block, it)) },
-                onDelete = { delete(index) },
-            )
+    LaunchedEffect(pendingFocus) {
+        pendingFocus?.let {
+            runCatching { focusRequester.requestFocus() }
+            pendingFocus = null
         }
-        TextButton(onClick = { addParagraph() }, modifier = Modifier.padding(top = 8.dp)) {
-            Icon(Icons.Filled.Add, contentDescription = null)
-            Text("  Ajouter un bloc")
+    }
+
+    fun commit(newLines: List<Line>) {
+        lines = newLines
+        onBodyChange(docToMarkdown(Doc(linesToBlocks(newLines))))
+    }
+
+    fun setLine(index: Int, line: Line) =
+        commit(lines.toMutableList().also { it[index] = line })
+
+    /** Handle a text change, splitting into a new line when Enter is pressed. */
+    fun onLineText(index: Int, newText: String) {
+        val nl = newText.indexOf('\n')
+        if (nl < 0) {
+            setLine(index, lines[index].copy(text = newText))
+            return
+        }
+        val before = newText.substring(0, nl)
+        val after = newText.substring(nl + 1)
+        val cur = lines[index]
+        // Continue lists; otherwise the new line is a paragraph.
+        val nextKind = when (cur.kind) {
+            LineKind.Bullet, LineKind.Ordered, LineKind.Task -> cur.kind
+            else -> LineKind.Paragraph
+        }
+        val updated = lines.toMutableList()
+        updated[index] = cur.copy(text = before)
+        updated.add(index + 1, Line(nextKind, after))
+        commit(updated)
+        pendingFocus = index + 1
+    }
+
+    fun setKind(kind: LineKind) {
+        val l = lines.getOrNull(focused) ?: return
+        setLine(
+            focused,
+            l.copy(
+                kind = kind,
+                level = if (kind == LineKind.Heading) 1 else l.level,
+                checked = if (kind == LineKind.Task) l.checked else false,
+            ),
+        )
+    }
+
+    Column(Modifier.fillMaxSize().imePadding()) {
+        Column(
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp, 8.dp),
+        ) {
+            var ordinal = 0
+            lines.forEachIndexed { index, line ->
+                ordinal = if (line.kind == LineKind.Ordered) ordinal + 1 else 0
+                LineRow(
+                    line = line,
+                    ordinal = ordinal,
+                    focusModifier = if (index == pendingFocus) Modifier.focusRequester(focusRequester) else Modifier,
+                    onFocused = { focused = index },
+                    onText = { onLineText(index, it) },
+                    onToggle = { setLine(index, line.copy(checked = it)) },
+                )
+            }
+        }
+        FormatBar(
+            onParagraph = { setKind(LineKind.Paragraph) },
+            onHeading = { setKind(LineKind.Heading) },
+            onBullet = { setKind(LineKind.Bullet) },
+            onTask = { setKind(LineKind.Task) },
+        )
+    }
+}
+
+@Composable
+private fun LineRow(
+    line: Line,
+    ordinal: Int,
+    focusModifier: Modifier,
+    onFocused: () -> Unit,
+    onText: (String) -> Unit,
+    onToggle: (Boolean) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        when (line.kind) {
+            LineKind.Task -> Checkbox(checked = line.checked, onCheckedChange = onToggle)
+            LineKind.Bullet -> Marker("•  ")
+            LineKind.Ordered -> Marker("$ordinal.  ")
+            LineKind.Quote -> Marker("│  ")
+            else -> {}
+        }
+        if (line.kind == LineKind.Code || line.kind == LineKind.Raw) {
+            Text(
+                line.text,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            )
+        } else {
+            val style = LocalTextStyle.current.copy(
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = if (line.kind == LineKind.Heading) headingSize(line.level) else LocalTextStyle.current.fontSize,
+                fontWeight = if (line.kind == LineKind.Heading) FontWeight.Bold else null,
+                fontStyle = if (line.kind == LineKind.Quote) FontStyle.Italic else null,
+            )
+            BasicTextField(
+                value = line.text,
+                onValueChange = onText,
+                textStyle = style,
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp)
+                    .onFocusChanged { if (it.isFocused) onFocused() }
+                    .then(focusModifier),
+            )
         }
     }
 }
 
-private enum class BlockType { Paragraph, H1, H2, Checklist, Bullet }
+@Composable
+private fun Marker(text: String) {
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
 
 @Composable
-private fun BlockRow(
-    block: Block,
-    onChange: (Block) -> Unit,
-    onSetType: (BlockType) -> Unit,
-    onDelete: () -> Unit,
+private fun FormatBar(
+    onParagraph: () -> Unit,
+    onHeading: () -> Unit,
+    onBullet: () -> Unit,
+    onTask: () -> Unit,
 ) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
-        BlockMenu(onSetType = onSetType, onDelete = onDelete)
-        Box(Modifier.fillMaxWidth()) {
-            when (block) {
-                is Block.Heading -> InlineField(
-                    text = inlineText(block.inlines),
-                    onText = { onChange(Block.Heading(block.level, plainRun(it))) },
-                    fontSize = if (block.level.toInt() == 1) 24.sp else 20.sp,
-                    weight = FontWeight.Bold,
-                )
-                is Block.Paragraph -> InlineField(
-                    text = inlineText(block.inlines),
-                    onText = { onChange(Block.Paragraph(plainRun(it))) },
-                )
-                is Block.TaskList -> Column {
-                    block.items.forEachIndexed { i, item ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(
-                                checked = item.checked,
-                                onCheckedChange = { checked ->
-                                    val items = block.items.toMutableList()
-                                    items[i] = TaskItem(checked, item.inlines)
-                                    onChange(Block.TaskList(items))
-                                },
-                            )
-                            InlineField(
-                                text = inlineText(item.inlines),
-                                onText = {
-                                    val items = block.items.toMutableList()
-                                    items[i] = TaskItem(item.checked, plainRun(it))
-                                    onChange(Block.TaskList(items))
-                                },
-                            )
-                        }
-                    }
-                }
-                is Block.BulletList -> Column {
-                    block.items.forEachIndexed { i, item ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("•  ", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            InlineField(
-                                text = inlineText(item.inlines),
-                                onText = {
-                                    val items = block.items.toMutableList()
-                                    items[i] = ListItem(plainRun(it))
-                                    onChange(Block.BulletList(items))
-                                },
-                            )
-                        }
-                    }
-                }
-                is Block.OrderedList -> Column {
-                    block.items.forEachIndexed { i, item ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("${i + 1}.  ", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            InlineField(
-                                text = inlineText(item.inlines),
-                                onText = {
-                                    val items = block.items.toMutableList()
-                                    items[i] = ListItem(plainRun(it))
-                                    onChange(Block.OrderedList(items))
-                                },
-                            )
-                        }
-                    }
-                }
-                is Block.Quote -> InlineField(
-                    text = inlineText(block.inlines),
-                    onText = { onChange(Block.Quote(plainRun(it))) },
-                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                )
-                is Block.CodeBlock -> ReadOnly(block.text, mono = true)
-                is Block.Raw -> ReadOnly(block.text, mono = true)
+    Surface(tonalElevation = 2.dp) {
+        Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onParagraph) {
+                Icon(Icons.Filled.Notes, contentDescription = "Paragraphe")
+            }
+            IconButton(onClick = onHeading) {
+                Icon(Icons.Filled.Title, contentDescription = "Titre")
+            }
+            IconButton(onClick = onBullet) {
+                Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Liste à puces")
+            }
+            IconButton(onClick = onTask) {
+                Icon(Icons.Filled.CheckBox, contentDescription = "Case à cocher")
             }
         }
     }
 }
 
-@Composable
-private fun BlockMenu(onSetType: (BlockType) -> Unit, onDelete: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        IconButton(onClick = { open = true }, modifier = Modifier.width(36.dp)) {
-            Icon(Icons.Filled.MoreVert, contentDescription = "Bloc")
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(
-                text = { Text("Paragraphe") },
-                onClick = { onSetType(BlockType.Paragraph); open = false },
-            )
-            DropdownMenuItem(
-                text = { Text("Titre 1") },
-                leadingIcon = { Icon(Icons.Filled.Title, null) },
-                onClick = { onSetType(BlockType.H1); open = false },
-            )
-            DropdownMenuItem(
-                text = { Text("Titre 2") },
-                onClick = { onSetType(BlockType.H2); open = false },
-            )
-            DropdownMenuItem(
-                text = { Text("Case à cocher") },
-                leadingIcon = { Icon(Icons.Filled.CheckBox, null) },
-                onClick = { onSetType(BlockType.Checklist); open = false },
-            )
-            DropdownMenuItem(
-                text = { Text("Liste à puces") },
-                leadingIcon = { Icon(Icons.AutoMirrored.Filled.List, null) },
-                onClick = { onSetType(BlockType.Bullet); open = false },
-            )
-            DropdownMenuItem(
-                text = { Text("Supprimer") },
-                leadingIcon = { Icon(Icons.Filled.Delete, null) },
-                onClick = { onDelete(); open = false },
-            )
+private fun headingSize(level: Int) = when (level) {
+    1 -> 24.sp
+    2 -> 20.sp
+    else -> 18.sp
+}
+
+// --- flat line model <-> core Doc ---
+
+private enum class LineKind { Paragraph, Heading, Bullet, Ordered, Task, Quote, Code, Raw }
+
+private data class Line(
+    val kind: LineKind,
+    val text: String,
+    val checked: Boolean = false,
+    val level: Int = 1,
+)
+
+private fun docToLines(doc: Doc): List<Line> = buildList {
+    for (b in doc.blocks) when (b) {
+        is Block.Heading -> add(Line(LineKind.Heading, inlineText(b.inlines), level = b.level.toInt()))
+        is Block.Paragraph -> add(Line(LineKind.Paragraph, inlineText(b.inlines)))
+        is Block.BulletList -> b.items.forEach { add(Line(LineKind.Bullet, inlineText(it.inlines))) }
+        is Block.OrderedList -> b.items.forEach { add(Line(LineKind.Ordered, inlineText(it.inlines))) }
+        is Block.TaskList -> b.items.forEach { add(Line(LineKind.Task, inlineText(it.inlines), it.checked)) }
+        is Block.Quote -> add(Line(LineKind.Quote, inlineText(b.inlines)))
+        is Block.CodeBlock -> add(Line(LineKind.Code, b.text))
+        is Block.Raw -> add(Line(LineKind.Raw, b.text))
+    }
+}.ifEmpty { listOf(Line(LineKind.Paragraph, "")) }
+
+private fun linesToBlocks(lines: List<Line>): List<Block> {
+    val blocks = mutableListOf<Block>()
+    var i = 0
+    while (i < lines.size) {
+        val l = lines[i]
+        when (l.kind) {
+            LineKind.Heading -> { blocks.add(Block.Heading(l.level.toUByte(), plainRun(l.text))); i++ }
+            LineKind.Paragraph -> { blocks.add(Block.Paragraph(plainRun(l.text))); i++ }
+            LineKind.Quote -> { blocks.add(Block.Quote(plainRun(l.text))); i++ }
+            LineKind.Code -> { blocks.add(Block.CodeBlock(l.text, null)); i++ }
+            LineKind.Raw -> { blocks.add(Block.Raw(l.text)); i++ }
+            LineKind.Bullet -> {
+                val items = mutableListOf<ListItem>()
+                while (i < lines.size && lines[i].kind == LineKind.Bullet) { items.add(ListItem(plainRun(lines[i].text))); i++ }
+                blocks.add(Block.BulletList(items))
+            }
+            LineKind.Ordered -> {
+                val items = mutableListOf<ListItem>()
+                while (i < lines.size && lines[i].kind == LineKind.Ordered) { items.add(ListItem(plainRun(lines[i].text))); i++ }
+                blocks.add(Block.OrderedList(items))
+            }
+            LineKind.Task -> {
+                val items = mutableListOf<TaskItem>()
+                while (i < lines.size && lines[i].kind == LineKind.Task) { items.add(TaskItem(lines[i].checked, plainRun(lines[i].text))); i++ }
+                blocks.add(Block.TaskList(items))
+            }
         }
     }
+    return blocks
 }
-
-@Composable
-private fun InlineField(
-    text: String,
-    onText: (String) -> Unit,
-    fontSize: androidx.compose.ui.unit.TextUnit = androidx.compose.ui.unit.TextUnit.Unspecified,
-    weight: FontWeight? = null,
-    fontStyle: androidx.compose.ui.text.font.FontStyle? = null,
-) {
-    val style = LocalTextStyle.current.copy(
-        color = MaterialTheme.colorScheme.onSurface,
-        fontSize = fontSize,
-        fontWeight = weight,
-        fontStyle = fontStyle,
-    )
-    BasicTextField(
-        value = text,
-        onValueChange = onText,
-        textStyle = style,
-        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-    )
-}
-
-@Composable
-private fun ReadOnly(text: String, mono: Boolean) {
-    Text(
-        text,
-        fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-    )
-}
-
-// --- helpers ---
 
 private fun plainRun(text: String): List<Inline> =
     listOf(Inline.Run(text, Marks(bold = false, italic = false, strikethrough = false, code = false)))
 
-/** Flatten inline content to plain text (spike: marks/link styling dropped on edit). */
+/** Flatten inline content to plain text (v0: marks/link styling dropped on edit). */
 private fun inlineText(inlines: List<Inline>): String = buildString {
     for (i in inlines) when (i) {
         is Inline.Run -> append(i.text)
         is Inline.Link -> append(inlineText(i.inlines))
     }
-}
-
-private fun changeType(block: Block, type: BlockType): Block {
-    val inlines = blockInlines(block)
-    return when (type) {
-        BlockType.Paragraph -> Block.Paragraph(inlines)
-        BlockType.H1 -> Block.Heading(1u, inlines)
-        BlockType.H2 -> Block.Heading(2u, inlines)
-        BlockType.Checklist -> Block.TaskList(listOf(TaskItem(false, inlines)))
-        BlockType.Bullet -> Block.BulletList(listOf(ListItem(inlines)))
-    }
-}
-
-/** Best-effort inlines for a block, for type changes. */
-private fun blockInlines(block: Block): List<Inline> = when (block) {
-    is Block.Heading -> block.inlines
-    is Block.Paragraph -> block.inlines
-    is Block.Quote -> block.inlines
-    is Block.TaskList -> block.items.firstOrNull()?.inlines ?: plainRun("")
-    is Block.BulletList -> block.items.firstOrNull()?.inlines ?: plainRun("")
-    is Block.OrderedList -> block.items.firstOrNull()?.inlines ?: plainRun("")
-    is Block.CodeBlock -> plainRun(block.text)
-    is Block.Raw -> plainRun(block.text)
 }
