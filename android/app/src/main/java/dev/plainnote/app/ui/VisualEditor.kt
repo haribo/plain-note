@@ -33,9 +33,16 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.plainnote.core.Block
@@ -50,7 +57,8 @@ import dev.plainnote.core.markdownToDoc
 /**
  * Visual (WYSIWYG) editor over the core document model. Internally a flat list
  * of lines (converted to/from the `Doc` on load/save); the format toolbar acts
- * on the current line and Enter adds a line. Storage stays Markdown.
+ * on the current line, Enter splits at the caret, and Backspace at the start of
+ * a line degrades its type then merges into the previous line.
  *
  * v0 flattens inline marks to plain text on edit — a later increment restores
  * non-destructive, displayed marks.
@@ -58,12 +66,13 @@ import dev.plainnote.core.markdownToDoc
 @Composable
 fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
     var lines by remember { mutableStateOf(docToLines(markdownToDoc(initialMarkdown))) }
+    var nextId by remember { mutableStateOf(lines.size.toLong()) }
     var focused by remember { mutableStateOf(0) }
-    var pendingFocus by remember { mutableStateOf<Int?>(null) }
+    var pendingFocus by remember { mutableStateOf<Long?>(null) }
     val focusRequester = remember { FocusRequester() }
 
     LaunchedEffect(pendingFocus) {
-        pendingFocus?.let {
+        if (pendingFocus != null) {
             runCatching { focusRequester.requestFocus() }
             pendingFocus = null
         }
@@ -73,42 +82,53 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
         lines = newLines
         onBodyChange(docToMarkdown(Doc(linesToBlocks(newLines))))
     }
+    fun setText(index: Int, text: String) =
+        commit(lines.toMutableList().also { it[index] = it[index].copy(text = text) })
+    fun freshId(): Long { val v = nextId; nextId = v + 1; return v }
 
-    fun setLine(index: Int, line: Line) =
-        commit(lines.toMutableList().also { it[index] = line })
-
-    /** Handle a text change, splitting into a new line when Enter is pressed. */
-    fun onLineText(index: Int, newText: String) {
-        val nl = newText.indexOf('\n')
-        if (nl < 0) {
-            setLine(index, lines[index].copy(text = newText))
-            return
-        }
-        val before = newText.substring(0, nl)
-        val after = newText.substring(nl + 1)
+    fun split(index: Int, before: String, after: String) {
         val cur = lines[index]
-        // Continue lists; otherwise the new line is a paragraph.
         val nextKind = when (cur.kind) {
             LineKind.Bullet, LineKind.Ordered, LineKind.Task -> cur.kind
             else -> LineKind.Paragraph
         }
         val updated = lines.toMutableList()
         updated[index] = cur.copy(text = before)
-        updated.add(index + 1, Line(nextKind, after))
+        val newLine = Line(freshId(), nextKind, after)
+        updated.add(index + 1, newLine)
         commit(updated)
-        pendingFocus = index + 1
+        pendingFocus = newLine.id
+    }
+
+    /** Returns true if the Backspace was handled (degrade or merge). */
+    fun backspaceAtStart(index: Int): Boolean {
+        val cur = lines[index]
+        if (cur.kind != LineKind.Paragraph) {
+            commit(lines.toMutableList().also {
+                it[index] = cur.copy(kind = LineKind.Paragraph, level = 1, checked = false)
+            })
+            return true
+        }
+        if (index == 0) return false
+        val prev = lines[index - 1]
+        if (prev.kind == LineKind.Code || prev.kind == LineKind.Raw) return false
+        val updated = lines.toMutableList()
+        updated[index - 1] = prev.copy(text = prev.text + cur.text)
+        updated.removeAt(index)
+        commit(updated)
+        pendingFocus = prev.id
+        return true
     }
 
     fun setKind(kind: LineKind) {
         val l = lines.getOrNull(focused) ?: return
-        setLine(
-            focused,
-            l.copy(
+        commit(lines.toMutableList().also {
+            it[focused] = l.copy(
                 kind = kind,
                 level = if (kind == LineKind.Heading) 1 else l.level,
                 checked = if (kind == LineKind.Task) l.checked else false,
-            ),
-        )
+            )
+        })
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -121,10 +141,12 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
                 LineRow(
                     line = line,
                     ordinal = ordinal,
-                    focusModifier = if (index == pendingFocus) Modifier.focusRequester(focusRequester) else Modifier,
+                    focusModifier = if (line.id == pendingFocus) Modifier.focusRequester(focusRequester) else Modifier,
                     onFocused = { focused = index },
-                    onText = { onLineText(index, it) },
-                    onToggle = { setLine(index, line.copy(checked = it)) },
+                    onText = { setText(index, it) },
+                    onSplit = { before, after -> split(index, before, after) },
+                    onBackspaceAtStart = { backspaceAtStart(index) },
+                    onToggle = { commit(lines.toMutableList().also { l -> l[index] = line.copy(checked = it) }) },
                 )
             }
         }
@@ -144,8 +166,16 @@ private fun LineRow(
     focusModifier: Modifier,
     onFocused: () -> Unit,
     onText: (String) -> Unit,
+    onSplit: (String, String) -> Unit,
+    onBackspaceAtStart: () -> Boolean,
     onToggle: (Boolean) -> Unit,
 ) {
+    // Caret-aware value; re-synced when the line's text changes externally (merge).
+    var tfv by remember(line.id) { mutableStateOf(TextFieldValue(line.text, TextRange(line.text.length))) }
+    LaunchedEffect(line.text) {
+        if (tfv.text != line.text) tfv = TextFieldValue(line.text, TextRange(line.text.length))
+    }
+
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         when (line.kind) {
             LineKind.Task -> Checkbox(checked = line.checked, onCheckedChange = onToggle)
@@ -169,14 +199,29 @@ private fun LineRow(
                 fontStyle = if (line.kind == LineKind.Quote) FontStyle.Italic else null,
             )
             BasicTextField(
-                value = line.text,
-                onValueChange = onText,
+                value = tfv,
+                onValueChange = { v ->
+                    val nl = v.text.indexOf('\n')
+                    if (nl >= 0) {
+                        onSplit(v.text.substring(0, nl), v.text.substring(nl + 1))
+                    } else {
+                        tfv = v
+                        onText(v.text)
+                    }
+                },
                 textStyle = style,
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 6.dp)
                     .onFocusChanged { if (it.isFocused) onFocused() }
+                    .onPreviewKeyEvent { ev ->
+                        ev.type == KeyEventType.KeyDown &&
+                            ev.key == Key.Backspace &&
+                            tfv.selection.start == 0 &&
+                            tfv.selection.collapsed &&
+                            onBackspaceAtStart()
+                    }
                     .then(focusModifier),
             )
         }
@@ -224,24 +269,29 @@ private fun headingSize(level: Int) = when (level) {
 private enum class LineKind { Paragraph, Heading, Bullet, Ordered, Task, Quote, Code, Raw }
 
 private data class Line(
+    val id: Long,
     val kind: LineKind,
     val text: String,
     val checked: Boolean = false,
     val level: Int = 1,
 )
 
-private fun docToLines(doc: Doc): List<Line> = buildList {
-    for (b in doc.blocks) when (b) {
-        is Block.Heading -> add(Line(LineKind.Heading, inlineText(b.inlines), level = b.level.toInt()))
-        is Block.Paragraph -> add(Line(LineKind.Paragraph, inlineText(b.inlines)))
-        is Block.BulletList -> b.items.forEach { add(Line(LineKind.Bullet, inlineText(it.inlines))) }
-        is Block.OrderedList -> b.items.forEach { add(Line(LineKind.Ordered, inlineText(it.inlines))) }
-        is Block.TaskList -> b.items.forEach { add(Line(LineKind.Task, inlineText(it.inlines), it.checked)) }
-        is Block.Quote -> add(Line(LineKind.Quote, inlineText(b.inlines)))
-        is Block.CodeBlock -> add(Line(LineKind.Code, b.text))
-        is Block.Raw -> add(Line(LineKind.Raw, b.text))
-    }
-}.ifEmpty { listOf(Line(LineKind.Paragraph, "")) }
+private fun docToLines(doc: Doc): List<Line> {
+    var id = 0L
+    fun next() = id++
+    return buildList {
+        for (b in doc.blocks) when (b) {
+            is Block.Heading -> add(Line(next(), LineKind.Heading, inlineText(b.inlines), level = b.level.toInt()))
+            is Block.Paragraph -> add(Line(next(), LineKind.Paragraph, inlineText(b.inlines)))
+            is Block.BulletList -> b.items.forEach { add(Line(next(), LineKind.Bullet, inlineText(it.inlines))) }
+            is Block.OrderedList -> b.items.forEach { add(Line(next(), LineKind.Ordered, inlineText(it.inlines))) }
+            is Block.TaskList -> b.items.forEach { add(Line(next(), LineKind.Task, inlineText(it.inlines), it.checked)) }
+            is Block.Quote -> add(Line(next(), LineKind.Quote, inlineText(b.inlines)))
+            is Block.CodeBlock -> add(Line(next(), LineKind.Code, b.text))
+            is Block.Raw -> add(Line(next(), LineKind.Raw, b.text))
+        }
+    }.ifEmpty { listOf(Line(0, LineKind.Paragraph, "")) }
+}
 
 private fun linesToBlocks(lines: List<Line>): List<Block> {
     val blocks = mutableListOf<Block>()
