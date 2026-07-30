@@ -12,6 +12,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.FormatBold
+import androidx.compose.material.icons.filled.FormatItalic
 import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material3.Checkbox
@@ -32,17 +34,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.plainnote.core.Block
@@ -68,6 +77,7 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
     var lines by remember { mutableStateOf(docToLines(markdownToDoc(initialMarkdown))) }
     var nextId by remember { mutableStateOf(lines.size.toLong()) }
     var focused by remember { mutableStateOf(0) }
+    var focusedValue by remember { mutableStateOf(TextFieldValue()) }
     var pendingFocus by remember { mutableStateOf<Long?>(null) }
     val focusRequester = remember { FocusRequester() }
 
@@ -143,6 +153,7 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
                     ordinal = ordinal,
                     focusModifier = if (line.id == pendingFocus) Modifier.focusRequester(focusRequester) else Modifier,
                     onFocused = { focused = index },
+                    onValue = { focusedValue = it },
                     onText = { setText(index, it) },
                     onSplit = { before, after -> split(index, before, after) },
                     onBackspaceAtStart = { backspaceAtStart(index) },
@@ -155,6 +166,8 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
             onHeading = { setKind(LineKind.Heading) },
             onBullet = { setKind(LineKind.Bullet) },
             onTask = { setKind(LineKind.Task) },
+            onBold = { setText(focused, Markdown.wrap(focusedValue, "**").text) },
+            onItalic = { setText(focused, Markdown.wrap(focusedValue, "*").text) },
         )
     }
 }
@@ -165,6 +178,7 @@ private fun LineRow(
     ordinal: Int,
     focusModifier: Modifier,
     onFocused: () -> Unit,
+    onValue: (TextFieldValue) -> Unit,
     onText: (String) -> Unit,
     onSplit: (String, String) -> Unit,
     onBackspaceAtStart: () -> Boolean,
@@ -198,6 +212,7 @@ private fun LineRow(
                 fontWeight = if (line.kind == LineKind.Heading) FontWeight.Bold else null,
                 fontStyle = if (line.kind == LineKind.Quote) FontStyle.Italic else null,
             )
+            val dim = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             BasicTextField(
                 value = tfv,
                 onValueChange = { v ->
@@ -206,15 +221,17 @@ private fun LineRow(
                         onSplit(v.text.substring(0, nl), v.text.substring(nl + 1))
                     } else {
                         tfv = v
+                        onValue(v)
                         onText(v.text)
                     }
                 },
                 textStyle = style,
+                visualTransformation = markdownVisual(dim),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 6.dp)
-                    .onFocusChanged { if (it.isFocused) onFocused() }
+                    .onFocusChanged { if (it.isFocused) { onFocused(); onValue(tfv) } }
                     .onPreviewKeyEvent { ev ->
                         ev.type == KeyEventType.KeyDown &&
                             ev.key == Key.Backspace &&
@@ -239,9 +256,17 @@ private fun FormatBar(
     onHeading: () -> Unit,
     onBullet: () -> Unit,
     onTask: () -> Unit,
+    onBold: () -> Unit,
+    onItalic: () -> Unit,
 ) {
     Surface(tonalElevation = 2.dp) {
         Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBold) {
+                Icon(Icons.Filled.FormatBold, contentDescription = "Gras")
+            }
+            IconButton(onClick = onItalic) {
+                Icon(Icons.Filled.FormatItalic, contentDescription = "Italique")
+            }
             IconButton(onClick = onParagraph) {
                 Icon(Icons.Filled.Notes, contentDescription = "Paragraphe")
             }
@@ -254,6 +279,34 @@ private fun FormatBar(
             IconButton(onClick = onTask) {
                 Icon(Icons.Filled.CheckBox, contentDescription = "Case à cocher")
             }
+        }
+    }
+}
+
+/** A "dim markers" visual transformation: content styled, `**`/`*`/… kept but faded. */
+private fun markdownVisual(dim: Color): VisualTransformation = VisualTransformation { text ->
+    TransformedText(styleMarkdown(text.text, dim), OffsetMapping.Identity)
+}
+
+private fun styleMarkdown(text: String, dim: Color): AnnotatedString = buildAnnotatedString {
+    append(text)
+    val dimStyle = SpanStyle(color = dim)
+    var i = 0
+    fun span(marker: String, content: SpanStyle) {
+        val close = text.indexOf(marker, i + marker.length)
+        if (close < 0) { i += marker.length; return }
+        addStyle(content, i + marker.length, close)
+        addStyle(dimStyle, i, i + marker.length)
+        addStyle(dimStyle, close, close + marker.length)
+        i = close + marker.length
+    }
+    while (i < text.length) {
+        when {
+            text.startsWith("**", i) -> span("**", SpanStyle(fontWeight = FontWeight.Bold))
+            text.startsWith("~~", i) -> span("~~", SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough))
+            text[i] == '*' -> span("*", SpanStyle(fontStyle = FontStyle.Italic))
+            text[i] == '`' -> span("`", SpanStyle(fontFamily = FontFamily.Monospace))
+            else -> i++
         }
     }
 }
@@ -281,12 +334,12 @@ private fun docToLines(doc: Doc): List<Line> {
     fun next() = id++
     return buildList {
         for (b in doc.blocks) when (b) {
-            is Block.Heading -> add(Line(next(), LineKind.Heading, inlineText(b.inlines), level = b.level.toInt()))
-            is Block.Paragraph -> add(Line(next(), LineKind.Paragraph, inlineText(b.inlines)))
-            is Block.BulletList -> b.items.forEach { add(Line(next(), LineKind.Bullet, inlineText(it.inlines))) }
-            is Block.OrderedList -> b.items.forEach { add(Line(next(), LineKind.Ordered, inlineText(it.inlines))) }
-            is Block.TaskList -> b.items.forEach { add(Line(next(), LineKind.Task, inlineText(it.inlines), it.checked)) }
-            is Block.Quote -> add(Line(next(), LineKind.Quote, inlineText(b.inlines)))
+            is Block.Heading -> add(Line(next(), LineKind.Heading, inlineMarkdown(b.inlines), level = b.level.toInt()))
+            is Block.Paragraph -> add(Line(next(), LineKind.Paragraph, inlineMarkdown(b.inlines)))
+            is Block.BulletList -> b.items.forEach { add(Line(next(), LineKind.Bullet, inlineMarkdown(it.inlines))) }
+            is Block.OrderedList -> b.items.forEach { add(Line(next(), LineKind.Ordered, inlineMarkdown(it.inlines))) }
+            is Block.TaskList -> b.items.forEach { add(Line(next(), LineKind.Task, inlineMarkdown(it.inlines), it.checked)) }
+            is Block.Quote -> add(Line(next(), LineKind.Quote, inlineMarkdown(b.inlines)))
             is Block.CodeBlock -> add(Line(next(), LineKind.Code, b.text))
             is Block.Raw -> add(Line(next(), LineKind.Raw, b.text))
         }
@@ -327,10 +380,19 @@ private fun linesToBlocks(lines: List<Line>): List<Block> {
 private fun plainRun(text: String): List<Inline> =
     listOf(Inline.Run(text, Marks(bold = false, italic = false, strikethrough = false, code = false)))
 
-/** Flatten inline content to plain text (v0: marks/link styling dropped on edit). */
-private fun inlineText(inlines: List<Inline>): String = buildString {
+/** Serialize inlines back to canonical inline Markdown (marks preserved). */
+private fun inlineMarkdown(inlines: List<Inline>): String = buildString {
     for (i in inlines) when (i) {
-        is Inline.Run -> append(i.text)
-        is Inline.Link -> append(inlineText(i.inlines))
+        is Inline.Run -> append(applyMarks(i.text, i.marks))
+        is Inline.Link -> append("[").append(inlineMarkdown(i.inlines)).append("](").append(i.href).append(")")
     }
+}
+
+private fun applyMarks(text: String, m: Marks): String {
+    var s = text
+    if (m.code) s = "`$s`"
+    if (m.strikethrough) s = "~~$s~~"
+    if (m.italic) s = "*$s*"
+    if (m.bold) s = "**$s**"
+    return s
 }
