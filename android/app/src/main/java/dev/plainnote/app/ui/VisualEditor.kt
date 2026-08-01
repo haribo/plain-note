@@ -33,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -212,7 +211,6 @@ private fun LineRow(
                 fontWeight = if (line.kind == LineKind.Heading) FontWeight.Bold else null,
                 fontStyle = if (line.kind == LineKind.Quote) FontStyle.Italic else null,
             )
-            val dim = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             BasicTextField(
                 value = tfv,
                 onValueChange = { v ->
@@ -226,7 +224,7 @@ private fun LineRow(
                     }
                 },
                 textStyle = style,
-                visualTransformation = markdownVisual(dim),
+                visualTransformation = hideMarkers,
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -283,33 +281,100 @@ private fun FormatBar(
     }
 }
 
-/** A "dim markers" visual transformation: content styled, `**`/`*`/… kept but faded. */
-private fun markdownVisual(dim: Color): VisualTransformation = VisualTransformation { text ->
-    TransformedText(styleMarkdown(text.text, dim), OffsetMapping.Identity)
-}
+private const val M_BOLD = 1
+private const val M_ITALIC = 2
+private const val M_CODE = 4
+private const val M_STRIKE = 8
 
-private fun styleMarkdown(text: String, dim: Color): AnnotatedString = buildAnnotatedString {
-    append(text)
-    val dimStyle = SpanStyle(color = dim)
-    var i = 0
-    fun span(marker: String, content: SpanStyle) {
-        val close = text.indexOf(marker, i + marker.length)
-        if (close < 0) { i += marker.length; return }
-        addStyle(content, i + marker.length, close)
-        addStyle(dimStyle, i, i + marker.length)
-        addStyle(dimStyle, close, close + marker.length)
-        i = close + marker.length
-    }
-    while (i < text.length) {
-        when {
-            text.startsWith("**", i) -> span("**", SpanStyle(fontWeight = FontWeight.Bold))
-            text.startsWith("~~", i) -> span("~~", SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough))
-            text[i] == '*' -> span("*", SpanStyle(fontStyle = FontStyle.Italic))
-            text[i] == '`' -> span("`", SpanStyle(fontFamily = FontFamily.Monospace))
-            else -> i++
+// Longest markers first so `***`/`**` win over `*`.
+private val MARKERS = listOf(
+    "***" to (M_BOLD or M_ITALIC),
+    "**" to M_BOLD,
+    "~~" to M_STRIKE,
+    "*" to M_ITALIC,
+    "`" to M_CODE,
+)
+
+/**
+ * True-WYSIWYG transform (3B, option A): inline markers are hidden entirely and
+ * their content is styled. A pure function of the text (no caret-based reveal),
+ * with a non-identity [OffsetMapping] so the caret skips the hidden markers
+ * instead of resting on them. An unterminated marker is left literal, unstyled.
+ */
+private val hideMarkers = VisualTransformation { text -> transformHidingMarkers(text.text) }
+
+internal fun transformHidingMarkers(src: String): TransformedText {
+    val n = src.length
+    val dropped = BooleanArray(n)
+    val flags = IntArray(n)
+
+    // Recursive descent so nested marks (e.g. `***x***` = bold+italic) stack.
+    fun parse(lo: Int, hi: Int, base: Int) {
+        var i = lo
+        while (i < hi) {
+            // A marker matches only with a non-empty content and a closing token
+            // that fits before `hi` — so `**` alone stays literal, unstyled.
+            val hit = MARKERS.firstOrNull { (m, _) ->
+                src.startsWith(m, i) &&
+                    src.indexOf(m, i + m.length).let { it in (i + m.length + 1)..(hi - m.length) }
+            }
+            if (hit != null) {
+                val (m, bit) = hit
+                val close = src.indexOf(m, i + m.length)
+                for (k in i until i + m.length) dropped[k] = true
+                parse(i + m.length, close, base or bit)
+                for (k in close until close + m.length) dropped[k] = true
+                i = close + m.length
+            } else {
+                flags[i] = base
+                i++
+            }
         }
     }
+    parse(0, n, 0)
+
+    val sb = StringBuilder()
+    val o2t = IntArray(n + 1)
+    val spans = mutableListOf<Triple<Int, Int, Int>>() // transStart, transEnd, flags
+    var runFlags = -1
+    var runStart = 0
+    for (i in 0 until n) {
+        if (!dropped[i]) {
+            val f = flags[i]
+            if (f != runFlags) {
+                if (runFlags > 0 && sb.length > runStart) spans.add(Triple(runStart, sb.length, runFlags))
+                runFlags = f
+                runStart = sb.length
+            }
+            sb.append(src[i])
+        }
+        o2t[i + 1] = sb.length
+    }
+    if (runFlags > 0 && sb.length > runStart) spans.add(Triple(runStart, sb.length, runFlags))
+
+    val ann = buildAnnotatedString {
+        append(sb.toString())
+        for ((start, end, f) in spans) addStyle(spanFor(f), start, end)
+    }
+    val mapping = object : OffsetMapping {
+        override fun originalToTransformed(offset: Int): Int = o2t[offset.coerceIn(0, n)]
+        override fun transformedToOriginal(offset: Int): Int {
+            val t = offset.coerceIn(0, sb.length)
+            // Last source index mapping to t: places the caret past hidden markers.
+            var s = 0
+            for (i in 0..n) if (o2t[i] == t) s = i
+            return s
+        }
+    }
+    return TransformedText(ann, mapping)
 }
+
+private fun spanFor(f: Int) = SpanStyle(
+    fontWeight = if (f and M_BOLD != 0) FontWeight.Bold else null,
+    fontStyle = if (f and M_ITALIC != 0) FontStyle.Italic else null,
+    fontFamily = if (f and M_CODE != 0) FontFamily.Monospace else null,
+    textDecoration = if (f and M_STRIKE != 0) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+)
 
 /**
  * Read-only rendered view of a note: the same block model, styled, with inline
