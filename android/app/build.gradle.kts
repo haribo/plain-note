@@ -95,6 +95,11 @@ dependencies {
     // UniFFI-generated Kotlin needs JNA (with the @aar classifier on Android).
     implementation("net.java.dev.jna:jna:5.14.0@aar")
 
+    // JVM unit tests for the pure Kotlin editor transforms (no device, no native
+    // lib: the UniFFI bindings load libplain_note_mobile.so lazily on the first
+    // FFI call, and these tests only construct data classes + call transforms).
+    testImplementation("junit:junit:4.13.2")
+
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
