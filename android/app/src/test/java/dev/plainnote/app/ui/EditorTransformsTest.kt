@@ -136,4 +136,17 @@ class EditorTransformsTest {
         val src = t.offsetMapping.transformedToOriginal(2)
         assertEquals('b', "a **b** c"[src])
     }
+
+    @Test
+    fun hide_link_shows_only_label() {
+        assertEquals("Voir la doc fin", transformHidingMarkers("Voir [la doc](https://x.dev) fin").text.text)
+        // Marks inside the label still apply and are hidden.
+        assertEquals("b", transformHidingMarkers("[**b**](u)").text.text)
+    }
+
+    @Test
+    fun hide_keeps_malformed_link_literal() {
+        assertEquals("[label] sans url", transformHidingMarkers("[label] sans url").text.text)
+        assertEquals("[](x)", transformHidingMarkers("[](x)").text.text) // empty label
+    }
 }

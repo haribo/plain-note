@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -224,7 +225,7 @@ private fun LineRow(
                     }
                 },
                 textStyle = style,
-                visualTransformation = hideMarkers,
+                visualTransformation = hideMarkers(MaterialTheme.colorScheme.primary),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -285,6 +286,7 @@ private const val M_BOLD = 1
 private const val M_ITALIC = 2
 private const val M_CODE = 4
 private const val M_STRIKE = 8
+private const val M_LINK = 16
 
 // Longest markers first so `***`/`**` win over `*`.
 private val MARKERS = listOf(
@@ -301,9 +303,10 @@ private val MARKERS = listOf(
  * with a non-identity [OffsetMapping] so the caret skips the hidden markers
  * instead of resting on them. An unterminated marker is left literal, unstyled.
  */
-private val hideMarkers = VisualTransformation { text -> transformHidingMarkers(text.text) }
+private fun hideMarkers(linkColor: Color) =
+    VisualTransformation { text -> transformHidingMarkers(text.text, linkColor) }
 
-internal fun transformHidingMarkers(src: String): TransformedText {
+internal fun transformHidingMarkers(src: String, linkColor: Color = Color.Unspecified): TransformedText {
     val n = src.length
     val dropped = BooleanArray(n)
     val flags = IntArray(n)
@@ -312,6 +315,21 @@ internal fun transformHidingMarkers(src: String): TransformedText {
     fun parse(lo: Int, hi: Int, base: Int) {
         var i = lo
         while (i < hi) {
+            // Link `[label](url)`: keep the label (styled), hide `[`, `]`, `(url)`.
+            // Malformed (no `(url)`, empty label) falls through and stays literal.
+            if (src[i] == '[') {
+                val rb = src.indexOf(']', i + 1)
+                if (rb in (i + 2) until hi && rb + 1 < hi && src[rb + 1] == '(') {
+                    val rp = src.indexOf(')', rb + 2)
+                    if (rp in (rb + 2)..(hi - 1)) {
+                        dropped[i] = true
+                        parse(i + 1, rb, base or M_LINK)
+                        for (k in rb..rp) dropped[k] = true
+                        i = rp + 1
+                        continue
+                    }
+                }
+            }
             // A marker matches only with a non-empty content and a closing token
             // that fits before `hi` — so `**` alone stays literal, unstyled.
             val hit = MARKERS.firstOrNull { (m, _) ->
@@ -325,10 +343,10 @@ internal fun transformHidingMarkers(src: String): TransformedText {
                 parse(i + m.length, close, base or bit)
                 for (k in close until close + m.length) dropped[k] = true
                 i = close + m.length
-            } else {
-                flags[i] = base
-                i++
+                continue
             }
+            flags[i] = base
+            i++
         }
     }
     parse(0, n, 0)
@@ -354,7 +372,7 @@ internal fun transformHidingMarkers(src: String): TransformedText {
 
     val ann = buildAnnotatedString {
         append(sb.toString())
-        for ((start, end, f) in spans) addStyle(spanFor(f), start, end)
+        for ((start, end, f) in spans) addStyle(spanFor(f, linkColor), start, end)
     }
     val mapping = object : OffsetMapping {
         override fun originalToTransformed(offset: Int): Int = o2t[offset.coerceIn(0, n)]
@@ -369,11 +387,22 @@ internal fun transformHidingMarkers(src: String): TransformedText {
     return TransformedText(ann, mapping)
 }
 
-private fun spanFor(f: Int) = SpanStyle(
+private fun spanFor(f: Int, linkColor: Color) = SpanStyle(
     fontWeight = if (f and M_BOLD != 0) FontWeight.Bold else null,
     fontStyle = if (f and M_ITALIC != 0) FontStyle.Italic else null,
     fontFamily = if (f and M_CODE != 0) FontFamily.Monospace else null,
-    textDecoration = if (f and M_STRIKE != 0) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+    color = if (f and M_LINK != 0) linkColor else Color.Unspecified,
+    textDecoration = when {
+        f and M_STRIKE != 0 && f and M_LINK != 0 -> androidx.compose.ui.text.style.TextDecoration.combine(
+            listOf(
+                androidx.compose.ui.text.style.TextDecoration.LineThrough,
+                androidx.compose.ui.text.style.TextDecoration.Underline,
+            ),
+        )
+        f and M_STRIKE != 0 -> androidx.compose.ui.text.style.TextDecoration.LineThrough
+        f and M_LINK != 0 -> androidx.compose.ui.text.style.TextDecoration.Underline
+        else -> null
+    },
 )
 
 /**
