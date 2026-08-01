@@ -317,7 +317,14 @@ private fun styleMarkdown(text: String, dim: Color): AnnotatedString = buildAnno
  */
 @Composable
 fun DocView(markdown: String, modifier: Modifier = Modifier) {
+    // markdownToDoc crosses UniFFI (native lib); DocLines is pure so it can be
+    // rendered under Robolectric in screenshot tests with hand-built lines.
     val lines = remember(markdown) { docToLines(markdownToDoc(markdown)) }
+    DocLines(lines, modifier)
+}
+
+@Composable
+internal fun DocLines(lines: List<Line>, modifier: Modifier = Modifier) {
     Column(modifier.verticalScroll(rememberScrollState()).padding(16.dp, 8.dp)) {
         var ordinal = 0
         lines.forEach { line ->

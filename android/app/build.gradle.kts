@@ -12,6 +12,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.mozilla.rust-android-gradle.rust-android")
+    id("io.github.takahirom.roborazzi")
 }
 
 android {
@@ -46,6 +47,13 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+        }
+    }
+
+    // Roborazzi renders composables through Robolectric on the JVM.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
         }
     }
 }
@@ -93,6 +101,9 @@ tasks.named("preBuild").configure {
 }
 
 dependencies {
+    // Shared Compose BOM — used by main, unit-test (Roborazzi) and androidTest.
+    val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
+
     // UniFFI-generated Kotlin needs JNA (with the @aar classifier on Android).
     implementation("net.java.dev.jna:jna:5.14.0@aar")
 
@@ -101,12 +112,20 @@ dependencies {
     // FFI call, and these tests only construct data classes + call transforms).
     testImplementation("junit:junit:4.13.2")
 
+    // Screenshot tests (L3): Roborazzi renders composables via Robolectric on the
+    // JVM — deterministic golden PNGs, no device.
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.26.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.26.0")
+
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

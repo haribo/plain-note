@@ -41,7 +41,7 @@ jobs:
         run: cargo test --workspace
 
   android:
-    name: android unit tests
+    name: android tests
     # Skip the redundant run on develop push — the PR into develop already ran it.
     if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest
@@ -66,6 +66,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Unit tests
+      # verifyRoborazziDebug runs the JVM unit tests (L1) AND verifies the
+      # screenshot goldens (L3) in one pass. Compose UI tests (L2) need an
+      # emulator and are run locally, not here.
+      - name: Unit + screenshot tests
         working-directory: android
-        run: ./gradlew :app:testDebugUnitTest
+        run: ./gradlew :app:verifyRoborazziDebug
