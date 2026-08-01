@@ -52,6 +52,28 @@ The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. Install it on
 a device with `adb install -r <apk>`. The store file is created in the app's
 private `filesDir` (`plain-note/store.automerge`).
 
+## Testing
+
+Two layers (see epic #97):
+
+**Unit tests (JVM, no device)** — the pure Kotlin editor transforms. Fast, run
+in CI (`android unit tests` job):
+
+```sh
+./gradlew :app:testDebugUnitTest
+```
+
+**Compose UI tests (instrumented, on an emulator)** — the WYSIWYG editor
+gestures. Not run per-PR in CI (an emulator runner is out of scope); run them
+locally against a booted emulator:
+
+```sh
+# Pin the target so a physical phone connected in parallel is never touched.
+ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest
+```
+
+Results land under `app/build/reports/androidTests/connected/`.
+
 ## Sync & pairing
 
 One-shot sync and device pairing are wired to the facade (see
