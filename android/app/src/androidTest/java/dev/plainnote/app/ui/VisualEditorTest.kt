@@ -5,6 +5,7 @@ import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import org.junit.Assert.assertEquals
@@ -59,6 +60,17 @@ class VisualEditorTest {
         host("- [ ] a") { body = it }
         rule.onNode(isToggleable()).performClick()
         rule.runOnIdle { assertEquals("- [x] a", body) }
+    }
+
+    @Test
+    fun heading_button_cycles_levels() {
+        var body = ""
+        host("hello") { body = it }
+        val btn = rule.onNodeWithTag("heading-level")
+        btn.performClick(); rule.runOnIdle { assertEquals("# hello", body) }
+        btn.performClick(); rule.runOnIdle { assertEquals("## hello", body) }
+        btn.performClick(); rule.runOnIdle { assertEquals("### hello", body) }
+        btn.performClick(); rule.runOnIdle { assertEquals("hello", body) }
     }
 
     @Test
