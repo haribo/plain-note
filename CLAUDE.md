@@ -51,6 +51,17 @@ This file takes precedence over auto-memory. If an auto-memory entry contradicts
 - Changes to `core::crypto` or the wire format require updating `docs/sync-protocol.md` in the same diff and stating the security invariant affected
 - The relay must remain zero-knowledge — never add a code path that could read or log note plaintext or the E2E key
 
+## UI changes (Android)
+
+- Full workflow: follow `docs/ui-change-workflow.md` strictly
+- Mockup-first: before any UI-modifying change (including additions to an existing surface), produce a mockup Artifact (static HTML of the touched surfaces and states, light+dark, realistic data including edge cases; debated variants side by side) and obtain explicit validation before writing code
+- Exemptions: provably pixel-identical refactors, and fixes restoring an existing rendering with no new surface
+- Before merge, validate the result visually: share in the conversation `adb screencap` screenshots of each changed surface — initial state + principal interaction state (keyboard/sheet open), both themes — captured on the emulator only (`ANDROID_SERIAL=emulator-5554`, never a physical device)
+- Screenshots live in the scratchpad; never put screenshot paths in the PR body, a commit, or any git-tracked file
+- Roborazzi golden tests are the automated conformance gate (both themes, CI-enforced): add/record a golden for any new read-only rendering surface; the manual screenshots cover interactive states Roborazzi cannot reach
+- Each visual-validation request states what to check: one line per screenshot naming the elements/states and the expected outcome
+- GTK / CLI / relay: no mockup or screenshot gate yet (no headless display, or no visual surface)
+
 ## Testing
 
 - Never modify existing tests without explicit approval
