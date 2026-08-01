@@ -430,6 +430,7 @@ internal fun DocLines(lines: List<Line>, modifier: Modifier = Modifier) {
 
 @Composable
 private fun ViewRow(line: Line, ordinal: Int) {
+    val linkColor = MaterialTheme.colorScheme.primary
     when (line.kind) {
         LineKind.Code, LineKind.Raw -> Text(
             line.text,
@@ -443,7 +444,7 @@ private fun ViewRow(line: Line, ordinal: Int) {
         ) {
             Checkbox(checked = line.checked, onCheckedChange = null)
             Text(
-                renderInline(line.text),
+                renderInline(line.text, linkColor),
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.padding(start = 4.dp),
             )
@@ -457,7 +458,7 @@ private fun ViewRow(line: Line, ordinal: Int) {
             }
             if (prefix.isNotEmpty()) Text(prefix, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                renderInline(line.text),
+                renderInline(line.text, linkColor),
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = if (line.kind == LineKind.Heading) headingSize(line.level) else LocalTextStyle.current.fontSize,
                 fontWeight = if (line.kind == LineKind.Heading) FontWeight.Bold else null,
@@ -467,27 +468,12 @@ private fun ViewRow(line: Line, ordinal: Int) {
     }
 }
 
-/** Inline Markdown → styled text with the markers removed (rendered look). */
-private fun renderInline(text: String): AnnotatedString = buildAnnotatedString {
-    var i = 0
-    fun mark(marker: String, style: SpanStyle): Boolean {
-        if (!text.startsWith(marker, i)) return false
-        val close = text.indexOf(marker, i + marker.length)
-        if (close < 0) return false
-        pushStyle(style)
-        append(text.substring(i + marker.length, close))
-        pop()
-        i = close + marker.length
-        return true
-    }
-    while (i < text.length) {
-        val handled = mark("**", SpanStyle(fontWeight = FontWeight.Bold)) ||
-            mark("~~", SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)) ||
-            mark("*", SpanStyle(fontStyle = FontStyle.Italic)) ||
-            mark("`", SpanStyle(fontFamily = FontFamily.Monospace))
-        if (!handled) { append(text[i]); i++ }
-    }
-}
+/**
+ * Inline Markdown → styled text with markers stripped, for the read-only view.
+ * Delegates to the editor's transform so both render identically.
+ */
+private fun renderInline(text: String, linkColor: Color): AnnotatedString =
+    transformHidingMarkers(text, linkColor).text
 
 private fun headingSize(level: Int) = when (level) {
     1 -> 24.sp
