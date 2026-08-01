@@ -396,9 +396,9 @@ private fun headingSize(level: Int) = when (level) {
 
 // --- flat line model <-> core Doc ---
 
-private enum class LineKind { Paragraph, Heading, Bullet, Ordered, Task, Quote, Code, Raw }
+internal enum class LineKind { Paragraph, Heading, Bullet, Ordered, Task, Quote, Code, Raw }
 
-private data class Line(
+internal data class Line(
     val id: Long,
     val kind: LineKind,
     val text: String,
@@ -406,7 +406,7 @@ private data class Line(
     val level: Int = 1,
 )
 
-private fun docToLines(doc: Doc): List<Line> {
+internal fun docToLines(doc: Doc): List<Line> {
     var id = 0L
     fun next() = id++
     return buildList {
@@ -423,7 +423,7 @@ private fun docToLines(doc: Doc): List<Line> {
     }.ifEmpty { listOf(Line(0, LineKind.Paragraph, "")) }
 }
 
-private fun linesToBlocks(lines: List<Line>): List<Block> {
+internal fun linesToBlocks(lines: List<Line>): List<Block> {
     val blocks = mutableListOf<Block>()
     var i = 0
     while (i < lines.size) {
@@ -454,18 +454,18 @@ private fun linesToBlocks(lines: List<Line>): List<Block> {
     return blocks
 }
 
-private fun plainRun(text: String): List<Inline> =
+internal fun plainRun(text: String): List<Inline> =
     listOf(Inline.Run(text, Marks(bold = false, italic = false, strikethrough = false, code = false)))
 
 /** Serialize inlines back to canonical inline Markdown (marks preserved). */
-private fun inlineMarkdown(inlines: List<Inline>): String = buildString {
+internal fun inlineMarkdown(inlines: List<Inline>): String = buildString {
     for (i in inlines) when (i) {
         is Inline.Run -> append(applyMarks(i.text, i.marks))
         is Inline.Link -> append("[").append(inlineMarkdown(i.inlines)).append("](").append(i.href).append(")")
     }
 }
 
-private fun applyMarks(text: String, m: Marks): String {
+internal fun applyMarks(text: String, m: Marks): String {
     var s = text
     if (m.code) s = "`$s`"
     if (m.strikethrough) s = "~~$s~~"

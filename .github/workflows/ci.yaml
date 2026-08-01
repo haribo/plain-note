@@ -39,3 +39,33 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  android:
+    name: android unit tests
+    # Skip the redundant run on develop push — the PR into develop already ran it.
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager "ndk;26.3.11579264"
+
+      # The rust-android-gradle plugin cross-compiles the `mobile` crate; the
+      # UniFFI bindings are generated from the built .so before Kotlin compiles.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest
