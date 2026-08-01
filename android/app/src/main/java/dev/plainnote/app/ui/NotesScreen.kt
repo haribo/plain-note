@@ -19,9 +19,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Label
@@ -459,25 +461,37 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
     var title by remember(note.id) { mutableStateOf(note.title) }
     var body by remember(note.id) { mutableStateOf(TextFieldValue(note.text)) }
     var tags by remember(note.id) { mutableStateOf(note.tags) }
-    var visual by remember(note.id) { mutableStateOf(false) }
+    // Open notes in a styled read-only view; the pencil switches to editing.
+    var editing by remember(note.id) { mutableStateOf(false) }
+    // While editing, WYSIWYG is the default; Markdown is the power-user toggle.
+    var visual by remember(note.id) { mutableStateOf(true) }
     var showTag by remember(note.id) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Édition") },
+                title = { Text(if (editing) "Édition" else "Note") },
                 navigationIcon = {
-                    IconButton(onClick = { vm.close() }) {
+                    IconButton(onClick = { if (editing) editing = false else vm.close() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Retour")
                     }
                 },
                 actions = {
-                    // Two modes: visual (WYSIWYG, experimental) and raw Markdown.
-                    IconButton(onClick = { visual = !visual }) {
-                        Icon(
-                            if (visual) Icons.Filled.Code else Icons.AutoMirrored.Filled.Article,
-                            contentDescription = "Éditeur visuel / Markdown",
-                        )
+                    if (editing) {
+                        // Switch between WYSIWYG and raw Markdown while editing.
+                        IconButton(onClick = { visual = !visual }) {
+                            Icon(
+                                if (visual) Icons.Filled.Code else Icons.AutoMirrored.Filled.Article,
+                                contentDescription = "Éditeur visuel / Markdown",
+                            )
+                        }
+                        IconButton(onClick = { editing = false }) {
+                            Icon(Icons.Filled.Check, contentDescription = "Terminé")
+                        }
+                    } else {
+                        IconButton(onClick = { editing = true }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Éditer")
+                        }
                     }
                     IconButton(onClick = { vm.delete(note.id) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Supprimer")
@@ -486,53 +500,65 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
             )
         },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
-            OutlinedTextField(
-                value = title,
-                onValueChange = {
-                    title = it
-                    vm.saveTitle(note.id, it)
-                },
-                label = { Text("Titre") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(16.dp, 12.dp, 16.dp, 4.dp),
-            )
-            TagsRow(
-                tags = tags,
-                onRemove = { t -> tags = tags - t; vm.removeTag(note.id, t) },
-                onAdd = { showTag = true },
-            )
-            Text(
-                Markdown.count(body.text),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.fillMaxWidth().padding(16.dp, 0.dp),
-            )
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (visual) {
-                    VisualEditor(
-                        initialMarkdown = body.text,
-                        onBodyChange = { md ->
-                            body = TextFieldValue(md)
-                            vm.saveBody(note.id, md)
-                        },
-                    )
-                } else {
-                    TextField(
-                        value = body,
-                        onValueChange = {
-                            body = it
-                            vm.saveBody(note.id, it.text)
-                        },
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+        if (!editing) {
+            Column(Modifier.fillMaxSize().padding(padding)) {
+                Text(
+                    title.ifEmpty { "(sans titre)" },
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp, 16.dp, 16.dp, 4.dp),
+                )
+                if (tags.isNotEmpty()) ReadTagsRow(tags)
+                DocView(body.text, Modifier.fillMaxSize())
             }
-            if (!visual) {
-                FormatToolbar(body) { v ->
-                    body = v
-                    vm.saveBody(note.id, v.text)
+        } else {
+            Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = {
+                        title = it
+                        vm.saveTitle(note.id, it)
+                    },
+                    label = { Text("Titre") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp, 12.dp, 16.dp, 4.dp),
+                )
+                TagsRow(
+                    tags = tags,
+                    onRemove = { t -> tags = tags - t; vm.removeTag(note.id, t) },
+                    onAdd = { showTag = true },
+                )
+                Text(
+                    Markdown.count(body.text),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp, 0.dp),
+                )
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    if (visual) {
+                        VisualEditor(
+                            initialMarkdown = body.text,
+                            onBodyChange = { md ->
+                                body = TextFieldValue(md)
+                                vm.saveBody(note.id, md)
+                            },
+                        )
+                    } else {
+                        TextField(
+                            value = body,
+                            onValueChange = {
+                                body = it
+                                vm.saveBody(note.id, it.text)
+                            },
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+                if (!visual) {
+                    FormatToolbar(body) { v ->
+                        body = v
+                        vm.saveBody(note.id, v.text)
+                    }
                 }
             }
         }
@@ -543,6 +569,17 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
             onDismiss = { showTag = false },
             onAdd = { t -> tags = tags + t; vm.addTag(note.id, t); showTag = false },
         )
+    }
+}
+
+@Composable
+private fun ReadTagsRow(tags: List<String>) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(16.dp, 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        tags.forEach { t -> AssistChip(onClick = {}, label = { Text("#$t") }) }
     }
 }
 

@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -141,7 +140,8 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
         })
     }
 
-    Column(Modifier.fillMaxSize().imePadding()) {
+    // No imePadding here: the enclosing editor already applies it (avoids double padding).
+    Column(Modifier.fillMaxSize()) {
         Column(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp, 8.dp),
         ) {
@@ -308,6 +308,83 @@ private fun styleMarkdown(text: String, dim: Color): AnnotatedString = buildAnno
             text[i] == '`' -> span("`", SpanStyle(fontFamily = FontFamily.Monospace))
             else -> i++
         }
+    }
+}
+
+/**
+ * Read-only rendered view of a note: the same block model, styled, with inline
+ * markers stripped (true rendered look — no editing, so no caret mapping needed).
+ */
+@Composable
+fun DocView(markdown: String, modifier: Modifier = Modifier) {
+    val lines = remember(markdown) { docToLines(markdownToDoc(markdown)) }
+    Column(modifier.verticalScroll(rememberScrollState()).padding(16.dp, 8.dp)) {
+        var ordinal = 0
+        lines.forEach { line ->
+            ordinal = if (line.kind == LineKind.Ordered) ordinal + 1 else 0
+            ViewRow(line, ordinal)
+        }
+    }
+}
+
+@Composable
+private fun ViewRow(line: Line, ordinal: Int) {
+    when (line.kind) {
+        LineKind.Code, LineKind.Raw -> Text(
+            line.text,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        )
+        LineKind.Task -> Row(
+            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(checked = line.checked, onCheckedChange = null)
+            Text(
+                renderInline(line.text),
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+        else -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            val prefix = when (line.kind) {
+                LineKind.Bullet -> "•  "
+                LineKind.Ordered -> "$ordinal.  "
+                LineKind.Quote -> "│  "
+                else -> ""
+            }
+            if (prefix.isNotEmpty()) Text(prefix, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                renderInline(line.text),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = if (line.kind == LineKind.Heading) headingSize(line.level) else LocalTextStyle.current.fontSize,
+                fontWeight = if (line.kind == LineKind.Heading) FontWeight.Bold else null,
+                fontStyle = if (line.kind == LineKind.Quote) FontStyle.Italic else null,
+            )
+        }
+    }
+}
+
+/** Inline Markdown → styled text with the markers removed (rendered look). */
+private fun renderInline(text: String): AnnotatedString = buildAnnotatedString {
+    var i = 0
+    fun mark(marker: String, style: SpanStyle): Boolean {
+        if (!text.startsWith(marker, i)) return false
+        val close = text.indexOf(marker, i + marker.length)
+        if (close < 0) return false
+        pushStyle(style)
+        append(text.substring(i + marker.length, close))
+        pop()
+        i = close + marker.length
+        return true
+    }
+    while (i < text.length) {
+        val handled = mark("**", SpanStyle(fontWeight = FontWeight.Bold)) ||
+            mark("~~", SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)) ||
+            mark("*", SpanStyle(fontStyle = FontStyle.Italic)) ||
+            mark("`", SpanStyle(fontFamily = FontFamily.Monospace))
+        if (!handled) { append(text[i]); i++ }
     }
 }
 
