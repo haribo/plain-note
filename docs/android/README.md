@@ -57,11 +57,22 @@ private `filesDir` (`plain-note/store.automerge`).
 Two layers (see epic #97):
 
 **Unit tests (JVM, no device)** — the pure Kotlin editor transforms. Fast, run
-in CI (`android unit tests` job):
+in CI (`android tests` job):
 
 ```sh
 ./gradlew :app:testDebugUnitTest
 ```
+
+**Screenshot tests (JVM, Roborazzi + Robolectric)** — golden PNGs of the
+read-only rendering (`DocLines`), light and dark. Deterministic, run in CI
+(`verifyRoborazziDebug` also runs the unit tests above):
+
+```sh
+./gradlew :app:recordRoborazziDebug   # regenerate goldens after an intended change
+./gradlew :app:verifyRoborazziDebug   # fail on any visual diff
+```
+
+Goldens live under `app/src/test/roborazzi/` and are committed.
 
 **Compose UI tests (instrumented, on an emulator)** — the WYSIWYG editor
 gestures. Not run per-PR in CI (an emulator runner is out of scope); run them

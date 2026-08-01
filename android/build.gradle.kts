@@ -6,4 +6,5 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.0.20" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
     id("org.mozilla.rust-android-gradle.rust-android") version "0.9.6" apply false
+    id("io.github.takahirom.roborazzi") version "1.26.0" apply false
 }
