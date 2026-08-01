@@ -37,13 +37,15 @@ class DocViewScreenshotTest {
 
     private val sample = listOf(
         Line(0, LineKind.Heading, "Réunion produit", level = 1),
-        Line(1, LineKind.Paragraph, "Un point **très important** et de l'*italique*."),
-        Line(2, LineKind.Paragraph, "Voir [la doc](https://plainnote.org) ensuite."),
-        Line(3, LineKind.Task, "préparer le slide", checked = false),
-        Line(4, LineKind.Task, "envoyer l'invitation", checked = true),
-        Line(5, LineKind.Bullet, "ordre du jour"),
-        Line(6, LineKind.Quote, "Penser au budget"),
-        Line(7, LineKind.Code, "let x = 1"),
+        Line(1, LineKind.Heading, "Sous-titre", level = 2),
+        Line(2, LineKind.Heading, "Petite section", level = 3),
+        Line(3, LineKind.Paragraph, "Un point **très important** et de l'*italique*."),
+        Line(4, LineKind.Paragraph, "Voir [la doc](https://plainnote.org) ensuite."),
+        Line(5, LineKind.Task, "préparer le slide", checked = false),
+        Line(6, LineKind.Task, "envoyer l'invitation", checked = true),
+        Line(7, LineKind.Bullet, "ordre du jour"),
+        Line(8, LineKind.Quote, "Penser au budget"),
+        Line(9, LineKind.Code, "let x = 1"),
     )
 
     private fun capture(dark: Boolean, path: String) {

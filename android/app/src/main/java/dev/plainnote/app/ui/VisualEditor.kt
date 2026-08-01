@@ -40,6 +40,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -140,6 +141,19 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
         })
     }
 
+    // Cycle the current line: Paragraph -> H1 -> H2 -> H3 -> Paragraph.
+    fun cycleHeading() {
+        val l = lines.getOrNull(focused) ?: return
+        val (kind, level) = when {
+            l.kind != LineKind.Heading -> LineKind.Heading to 1
+            l.level < 3 -> LineKind.Heading to (l.level + 1)
+            else -> LineKind.Paragraph to 1
+        }
+        commit(lines.toMutableList().also {
+            it[focused] = l.copy(kind = kind, level = level, checked = false)
+        })
+    }
+
     // No imePadding here: the enclosing editor already applies it (avoids double padding).
     Column(Modifier.fillMaxSize()) {
         Column(
@@ -162,8 +176,9 @@ fun VisualEditor(initialMarkdown: String, onBodyChange: (String) -> Unit) {
             }
         }
         FormatBar(
+            headingLevel = lines.getOrNull(focused)?.takeIf { it.kind == LineKind.Heading }?.level,
             onParagraph = { setKind(LineKind.Paragraph) },
-            onHeading = { setKind(LineKind.Heading) },
+            onHeadingCycle = { cycleHeading() },
             onBullet = { setKind(LineKind.Bullet) },
             onTask = { setKind(LineKind.Task) },
             onBold = { setText(focused, Markdown.wrap(focusedValue, "**").text) },
@@ -251,8 +266,9 @@ private fun Marker(text: String) {
 
 @Composable
 private fun FormatBar(
+    headingLevel: Int?,
     onParagraph: () -> Unit,
-    onHeading: () -> Unit,
+    onHeadingCycle: () -> Unit,
     onBullet: () -> Unit,
     onTask: () -> Unit,
     onBold: () -> Unit,
@@ -269,8 +285,13 @@ private fun FormatBar(
             IconButton(onClick = onParagraph) {
                 Icon(Icons.Filled.Notes, contentDescription = "Paragraphe")
             }
-            IconButton(onClick = onHeading) {
-                Icon(Icons.Filled.Title, contentDescription = "Titre")
+            // Cycles Paragraph -> H1 -> H2 -> H3; shows the current level when set.
+            IconButton(onClick = onHeadingCycle, modifier = Modifier.testTag("heading-level")) {
+                if (headingLevel != null) {
+                    Text("H$headingLevel", fontWeight = FontWeight.Bold)
+                } else {
+                    Icon(Icons.Filled.Title, contentDescription = "Titre")
+                }
             }
             IconButton(onClick = onBullet) {
                 Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Liste à puces")
