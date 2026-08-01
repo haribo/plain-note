@@ -104,4 +104,36 @@ class EditorTransformsTest {
         assertEquals(LineKind.Paragraph, lines[0].kind)
         assertEquals("", lines[0].text)
     }
+
+    // --- hide-markers transform (3B) ---
+
+    @Test
+    fun hide_removes_inline_markers() {
+        assertEquals("Un gras ici", transformHidingMarkers("Un **gras** ici").text.text)
+        assertEquals("a b c", transformHidingMarkers("a *b* `c`").text.text)
+        assertEquals("barre", transformHidingMarkers("~~barre~~").text.text)
+    }
+
+    @Test
+    fun hide_stacks_nested_bold_italic() {
+        assertEquals("x", transformHidingMarkers("***x***").text.text)
+    }
+
+    @Test
+    fun hide_keeps_unterminated_marker_literal() {
+        // No closing token: the markers stay visible, unstyled.
+        assertEquals("un **gras", transformHidingMarkers("un **gras").text.text)
+        assertEquals("a * b", transformHidingMarkers("a * b").text.text)
+    }
+
+    @Test
+    fun hide_offset_mapping_skips_markers() {
+        val t = transformHidingMarkers("a **b** c") // -> "a b c"
+        assertEquals("a b c", t.text.text)
+        // Source end maps to transformed end.
+        assertEquals(t.text.text.length, t.offsetMapping.originalToTransformed("a **b** c".length))
+        // Transformed 'b' maps back onto the content char, never onto a hidden marker.
+        val src = t.offsetMapping.transformedToOriginal(2)
+        assertEquals('b', "a **b** c"[src])
+    }
 }
