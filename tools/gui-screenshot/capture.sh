@@ -16,6 +16,10 @@ cat > "$1" <<'TXT'
 
 Un point **très important** et de l'*italique* et du `code`, plus ~~barré~~.
 
+Voir [la doc](https://example.org) pour les détails.
+
+> Une citation *importante* à retenir.
+
 un **marqueur pas fermé
 TXT
 BODY

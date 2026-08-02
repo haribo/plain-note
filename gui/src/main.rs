@@ -622,6 +622,8 @@ enum SpanKind {
     H1,
     H2,
     H3,
+    Link,
+    Quote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +676,35 @@ fn parse_marks(
 ) {
     let mut i = lo;
     while i < hi {
+        // Link `[label](url)`: keep the label (styled), hide `[`, `]`, `(url)`.
+        if chars[i] == '[' {
+            let rb = find_close(chars, i + 1, hi, &[']']);
+            if let Some(rb) = rb
+                && rb > i + 1
+                && rb + 1 < hi
+                && chars[rb + 1] == '('
+                && let Some(rp) = find_close(chars, rb + 2, hi, &[')'])
+            {
+                out.push(Span {
+                    start: i,
+                    end: i + 1,
+                    kind: SpanKind::Hidden,
+                });
+                out.push(Span {
+                    start: i + 1,
+                    end: rb,
+                    kind: SpanKind::Link,
+                });
+                parse_marks(chars, i + 1, rb, markers, out); // marks inside the label
+                out.push(Span {
+                    start: rb,
+                    end: rp + 1,
+                    kind: SpanKind::Hidden,
+                });
+                i = rp + 1;
+                continue;
+            }
+        }
         let mut matched = false;
         for (m, kinds) in markers {
             let mc: Vec<char> = m.chars().collect();
@@ -752,6 +783,27 @@ fn spans(text: &str) -> Vec<Span> {
                 out.push(Span {
                     start: base + prefix + s.start,
                     end: base + prefix + s.end,
+                    kind: s.kind,
+                });
+            }
+        } else if let Some(content) = line.strip_prefix("> ") {
+            out.push(Span {
+                start: base,
+                end: base + 2,
+                kind: SpanKind::Hidden,
+            });
+            // Quote covers the whole line (including the hidden `> `) so its
+            // paragraph `left_margin` indents from the line start; the prefix
+            // stays invisible via the Hidden span above.
+            out.push(Span {
+                start: base,
+                end: base + ll,
+                kind: SpanKind::Quote,
+            });
+            for s in inline_spans(content) {
+                out.push(Span {
+                    start: base + 2 + s.start,
+                    end: base + 2 + s.end,
                     kind: s.kind,
                 });
             }
@@ -1728,6 +1780,15 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     let tag_h1 = gtk::TextTag::builder().weight(800).scale(1.6).build();
     let tag_h2 = gtk::TextTag::builder().weight(800).scale(1.3).build();
     let tag_h3 = gtk::TextTag::builder().weight(800).scale(1.15).build();
+    // Links: underlined, in the Adwaita accent blue. Quotes: italic + indented.
+    let tag_link = gtk::TextTag::builder()
+        .underline(gtk::pango::Underline::Single)
+        .foreground("#3584e4")
+        .build();
+    let tag_quote = gtk::TextTag::builder()
+        .style(gtk::pango::Style::Italic)
+        .left_margin(24)
+        .build();
     let all_tags = [
         &tag_bold,
         &tag_italic,
@@ -1737,6 +1798,8 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         &tag_h1,
         &tag_h2,
         &tag_h3,
+        &tag_link,
+        &tag_quote,
     ];
     for t in all_tags {
         buffer.tag_table().add(t);
@@ -1769,6 +1832,8 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
                     SpanKind::H1 => 5,
                     SpanKind::H2 => 6,
                     SpanKind::H3 => 7,
+                    SpanKind::Link => 8,
+                    SpanKind::Quote => 9,
                 };
                 buffer.apply_tag(&tags[idx], &a, &b);
             }
@@ -2411,6 +2476,56 @@ mod tests {
     fn inline_spans_leaves_unterminated_literal() {
         assert_eq!(inline_spans("un **gras"), vec![]);
         assert_eq!(inline_spans("a * b"), vec![]);
+    }
+
+    #[test]
+    fn inline_spans_hides_link_syntax_and_styles_label() {
+        use SpanKind::*;
+        // "voir [la doc](u)": hide "[", style "la doc", hide "](u)".
+        assert_eq!(
+            inline_spans("voir [la doc](u)"),
+            vec![span(5, 6, Hidden), span(6, 12, Link), span(12, 16, Hidden)],
+        );
+    }
+
+    #[test]
+    fn inline_spans_keeps_marks_inside_link_label() {
+        use SpanKind::*;
+        // "[**b**](u)": label styled as a link, with its inner bold still parsed.
+        assert_eq!(
+            inline_spans("[**b**](u)"),
+            vec![
+                span(0, 1, Hidden),
+                span(1, 6, Link),
+                span(1, 3, Hidden),
+                span(3, 4, Bold),
+                span(4, 6, Hidden),
+                span(6, 10, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn inline_spans_leaves_malformed_link_literal() {
+        // No "()" after the "]", or an empty label: nothing is hidden.
+        assert_eq!(inline_spans("[x] sans"), vec![]);
+        assert_eq!(inline_spans("[](u)"), vec![]);
+    }
+
+    #[test]
+    fn spans_hides_quote_prefix_and_styles_content() {
+        use SpanKind::*;
+        // "> cité": hide "> ", style the rest as a quote, inline marks still apply.
+        assert_eq!(
+            spans("> cité **fort**"),
+            vec![
+                span(0, 2, Hidden),
+                span(0, 15, Quote),
+                span(7, 9, Hidden),
+                span(9, 13, Bold),
+                span(13, 15, Hidden),
+            ],
+        );
     }
 
     #[test]
