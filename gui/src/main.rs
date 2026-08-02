@@ -608,135 +608,6 @@ fn note_title(t: &str) -> &str {
     if t.is_empty() { "(sans titre)" } else { t }
 }
 
-/// Escape text for inclusion in Pango markup.
-fn esc(s: &str) -> String {
-    glib::markup_escape_text(s).to_string()
-}
-
-/// Emphasis with `_`; escapes the leaf text.
-fn ital_underscore(s: &str) -> String {
-    let mut out = String::new();
-    for (i, p) in s.split('_').enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<i>");
-            out.push_str(&esc(p));
-            out.push_str("</i>");
-        } else {
-            out.push_str(&esc(p));
-        }
-    }
-    out
-}
-
-/// Emphasis with `*`, then `_`.
-fn ital_star(s: &str) -> String {
-    let mut out = String::new();
-    for (i, p) in s.split('*').enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<i>");
-            out.push_str(&ital_underscore(p));
-            out.push_str("</i>");
-        } else {
-            out.push_str(&ital_underscore(p));
-        }
-    }
-    out
-}
-
-/// Bold `**`, then italics. Toggle-splitting keeps every tag balanced even for
-/// unmatched delimiters, so the result is always valid Pango markup.
-fn emphasis(s: &str) -> String {
-    let mut out = String::new();
-    for (i, p) in s.split("**").enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<b>");
-            out.push_str(&ital_star(p));
-            out.push_str("</b>");
-        } else {
-            out.push_str(&ital_star(p));
-        }
-    }
-    out
-}
-
-/// Render one line's inline Markdown (code spans, bold, italics) to Pango.
-fn inline_md(s: &str) -> String {
-    let mut out = String::new();
-    for (i, seg) in s.split('`').enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<tt>");
-            out.push_str(&esc(seg));
-            out.push_str("</tt>");
-        } else {
-            out.push_str(&emphasis(seg));
-        }
-    }
-    out
-}
-
-/// A leading-`#` heading: returns the level (1..=6) and the remaining text.
-fn heading(line: &str) -> Option<(usize, &str)> {
-    let hashes = line.len() - line.trim_start_matches('#').len();
-    if (1..=6).contains(&hashes)
-        && let Some(rest) = line[hashes..].strip_prefix(' ')
-    {
-        return Some((hashes, rest));
-    }
-    None
-}
-
-/// Render Markdown to Pango markup for the preview pane. Deliberately small:
-/// headings, bold/italic, inline code, fenced code blocks and bullet lists.
-fn md_to_pango(src: &str) -> String {
-    let mut out = String::new();
-    let mut in_code = false;
-    let mut first = true;
-    for line in src.split('\n') {
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if !first {
-            out.push('\n');
-        }
-        first = false;
-
-        if in_code {
-            out.push_str("<tt>");
-            out.push_str(&esc(line));
-            out.push_str("</tt>");
-            continue;
-        }
-
-        let trimmed = line.trim_start();
-        if let Some((level, rest)) = heading(trimmed) {
-            let size = match level {
-                1 => "xx-large",
-                2 => "x-large",
-                3 => "large",
-                _ => "medium",
-            };
-            out.push_str(&format!(
-                "<span size=\"{size}\" weight=\"bold\">{}</span>",
-                inline_md(rest)
-            ));
-        } else if let Some(rest) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-        {
-            out.push_str("• ");
-            out.push_str(&inline_md(rest));
-        } else if let Some(rest) = trimmed.strip_prefix("> ") {
-            out.push_str("<i>");
-            out.push_str(&inline_md(rest));
-            out.push_str("</i>");
-        } else {
-            out.push_str(&inline_md(line));
-        }
-    }
-    out
-}
-
 // --- WYSIWYG inline styling (pure, unit-tested) ---
 
 /// A styled or hidden span over the source, in CHARACTER offsets (GtkTextBuffer
@@ -1816,14 +1687,20 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     for t in all_tags {
         buffer.tag_table().add(t);
     }
+    // When on, show the raw Markdown (no tags); otherwise the styled WYSIWYG view.
+    let source_mode = std::rc::Rc::new(std::cell::Cell::new(false));
     let restyle: std::rc::Rc<dyn Fn()> = std::rc::Rc::new({
         let buffer = buffer.clone();
+        let source_mode = source_mode.clone();
         let tags: Vec<gtk::TextTag> = all_tags.iter().map(|t| (*t).clone()).collect();
         move || {
             let start = buffer.start_iter();
             let end = buffer.end_iter();
             for t in &tags {
                 buffer.remove_tag(t, &start, &end);
+            }
+            if source_mode.get() {
+                return; // source mode: leave the Markdown markers visible
             }
             let text = buffer.text(&start, &end, false).to_string();
             for s in spans(&text) {
@@ -1848,29 +1725,10 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vexpand(true)
         .build();
 
-    // Edit / preview stack: the raw editor, or a rendered Markdown view.
-    let preview_label = gtk::Label::new(None);
-    preview_label.set_wrap(true);
-    preview_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    preview_label.set_xalign(0.0);
-    preview_label.set_yalign(0.0);
-    preview_label.set_selectable(true);
-    preview_label.set_margin_start(18);
-    preview_label.set_margin_end(18);
-    preview_label.set_margin_top(10);
-    preview_label.set_margin_bottom(18);
-    let preview_scroll = gtk::ScrolledWindow::builder()
-        .child(&preview_label)
-        .vexpand(true)
-        .build();
-    let stack = gtk::Stack::new();
-    stack.set_vexpand(true);
-    stack.add_named(&text_scroll, Some("edit"));
-    stack.add_named(&preview_scroll, Some("preview"));
-
-    // Footer: preview toggle on the left, live word/character count on the right.
-    let preview_toggle = gtk::ToggleButton::with_label("Aperçu");
-    preview_toggle.add_css_class("flat");
+    // Footer: source toggle on the left, live word/character count on the right.
+    let source_toggle = gtk::ToggleButton::with_label("Source");
+    source_toggle.set_tooltip_text(Some("Afficher le Markdown brut"));
+    source_toggle.add_css_class("flat");
     let count_label = gtk::Label::new(None);
     count_label.add_css_class("dim-label");
     count_label.add_css_class("caption");
@@ -1881,7 +1739,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     footer.set_margin_end(18);
     footer.set_margin_top(4);
     footer.set_margin_bottom(6);
-    footer.append(&preview_toggle);
+    footer.append(&source_toggle);
     footer.append(&count_label);
 
     // Attachments row: one chip per attachment + an "add" button. The button is
@@ -1913,24 +1771,16 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     editor.append(&tags_scroll);
     editor.append(&atts_scroll);
     editor.append(&toolbar);
-    editor.append(&stack);
+    editor.append(&text_scroll);
     editor.append(&footer);
 
-    // Toggle between editing and a rendered Markdown preview.
+    // Toggle raw Markdown (source) vs the styled WYSIWYG view.
     {
-        let buffer = buffer.clone();
-        let stack = stack.clone();
-        let preview_label = preview_label.clone();
-        preview_toggle.connect_toggled(move |btn| {
-            if btn.is_active() {
-                let text = buffer
-                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                    .to_string();
-                preview_label.set_markup(&md_to_pango(&text));
-                stack.set_visible_child_name("preview");
-            } else {
-                stack.set_visible_child_name("edit");
-            }
+        let source_mode = source_mode.clone();
+        let restyle = restyle.clone();
+        source_toggle.connect_toggled(move |btn| {
+            source_mode.set(btn.is_active());
+            restyle();
         });
     }
 
@@ -2455,7 +2305,7 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Span, SpanKind, count_text, heading_prefix, inline_spans, md_to_pango, parse_expanded,
+        Span, SpanKind, count_text, heading_prefix, inline_spans, parse_expanded,
         serialize_expanded, set_heading_line, spans, subtree_note_count, toggle_line_prefix,
         toggle_wrap,
     };
@@ -2668,40 +2518,5 @@ mod tests {
     #[test]
     fn count_text_ignores_extra_whitespace() {
         assert_eq!(count_text("  un   deux  "), "2 mots · 13 caractères");
-    }
-
-    #[test]
-    fn md_escapes_markup_special_chars() {
-        assert_eq!(md_to_pango("a < b & c"), "a &lt; b &amp; c");
-    }
-
-    #[test]
-    fn md_renders_emphasis_and_code() {
-        assert_eq!(md_to_pango("**gras**"), "<b>gras</b>");
-        assert_eq!(md_to_pango("*ital*"), "<i>ital</i>");
-        assert_eq!(md_to_pango("_ital_"), "<i>ital</i>");
-        assert_eq!(md_to_pango("`code`"), "<tt>code</tt>");
-    }
-
-    #[test]
-    fn md_renders_headings_and_lists() {
-        assert_eq!(
-            md_to_pango("# Titre"),
-            "<span size=\"xx-large\" weight=\"bold\">Titre</span>"
-        );
-        assert_eq!(md_to_pango("- item"), "• item");
-        assert_eq!(md_to_pango("* item"), "• item");
-    }
-
-    #[test]
-    fn md_renders_fenced_code_block_verbatim() {
-        assert_eq!(md_to_pango("```\na*b*\n```"), "<tt>a*b*</tt>");
-    }
-
-    #[test]
-    fn md_unmatched_delimiters_stay_balanced() {
-        // Toggle-splitting must never emit an unclosed tag.
-        let out = md_to_pango("**oups");
-        assert_eq!(out, "<b>oups</b>");
     }
 }
