@@ -124,10 +124,50 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createFolder(name: String) = viewModelScope.launch(Dispatchers.IO) {
+    /** Folder ids whose subtree is expanded in the drawer (in-memory). */
+    private val _expandedFolders = MutableStateFlow<Set<String>>(emptySet())
+    val expandedFolders = _expandedFolders.asStateFlow()
+
+    fun toggleFolderExpanded(id: String) {
+        _expandedFolders.value = _expandedFolders.value.toMutableSet().also {
+            if (!it.add(id)) it.remove(id)
+        }
+    }
+
+    fun createFolder(name: String, parent: String? = null) = viewModelScope.launch(Dispatchers.IO) {
         try {
-            repo.createFolder(name.trim())
+            repo.createFolder(name.trim(), parent)
             _folders.value = repo.listFolders()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun renameFolder(id: String, name: String) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.renameFolder(id, name.trim())
+            _folders.value = repo.listFolders()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun moveFolder(id: String, parent: String?) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.moveFolder(id, parent)
+            _folders.value = repo.listFolders()
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun deleteFolder(id: String) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            repo.deleteFolder(id)
+            // The core reparents children; drop the filter if it pointed here.
+            if (_currentFolder.value?.id == id) _currentFolder.value = null
+            _folders.value = repo.listFolders()
+            reloadNotes()
         } catch (e: Exception) {
             report(e)
         }
