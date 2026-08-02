@@ -1,5 +1,6 @@
 package dev.plainnote.app.ui
 
+import androidx.compose.ui.text.LinkAnnotation
 import dev.plainnote.core.Block
 import dev.plainnote.core.Doc
 import dev.plainnote.core.Inline
@@ -148,5 +149,21 @@ class EditorTransformsTest {
     fun hide_keeps_malformed_link_literal() {
         assertEquals("[label] sans url", transformHidingMarkers("[label] sans url").text.text)
         assertEquals("[](x)", transformHidingMarkers("[](x)").text.text) // empty label
+    }
+
+    @Test
+    fun linkable_attaches_url_over_the_label() {
+        val t = transformHidingMarkers("Voir [la doc](https://x.dev) fin", linkable = true).text
+        val links = t.getLinkAnnotations(0, t.length)
+        assertEquals(1, links.size)
+        assertEquals("https://x.dev", (links[0].item as LinkAnnotation.Url).url)
+        assertEquals("la doc", t.text.substring(links[0].start, links[0].end))
+    }
+
+    @Test
+    fun editor_transform_has_no_link_annotations() {
+        // Default (linkable = false): the editor field must not turn links clickable.
+        val t = transformHidingMarkers("[la doc](https://x.dev)").text
+        assertTrue(t.getLinkAnnotations(0, t.length).isEmpty())
     }
 }
