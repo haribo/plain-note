@@ -20,6 +20,10 @@ Voir [la doc](https://example.org) pour les détails.
 
 > Une citation *importante* à retenir.
 
+```rust
+let x = 42; // # pas un titre
+```
+
 un **marqueur pas fermé
 TXT
 BODY
