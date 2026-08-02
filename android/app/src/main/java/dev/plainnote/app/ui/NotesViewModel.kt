@@ -8,9 +8,18 @@ import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+
+/** Discreet sync status surfaced in the top bar. */
+enum class SyncState { Idle, Syncing, UpToDate, Offline }
+
+/** Debounce after the last edit before an automatic sync. */
+private const val AUTO_SYNC_DEBOUNCE_MS = 3_000L
 
 /**
  * Holds the note list (filtered by folder or search), the folder tree, the note
@@ -39,6 +48,13 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _status = MutableStateFlow<String?>(null)
     val status = _status.asStateFlow()
+
+    private val _syncState = MutableStateFlow(SyncState.Idle)
+    val syncState = _syncState.asStateFlow()
+
+    // Serializes syncs: tryLock skips a request while one is already running.
+    private val syncMutex = Mutex()
+    private var pendingAutoSync: Job? = null
 
     init {
         refresh()
@@ -168,6 +184,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
     fun saveTitle(id: String, title: String) = viewModelScope.launch(Dispatchers.IO) {
         try {
             repo.setTitle(id, title)
+            scheduleAutoSync()
         } catch (e: Exception) {
             report(e)
         }
@@ -176,6 +193,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
     fun saveBody(id: String, text: String) = viewModelScope.launch(Dispatchers.IO) {
         try {
             repo.setBody(id, text)
+            scheduleAutoSync()
         } catch (e: Exception) {
             report(e)
         }
@@ -191,18 +209,43 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sync() = viewModelScope.launch(Dispatchers.IO) {
-        _status.value = try {
-            if (!repo.isEnrolled()) {
-                "Appareil non associé"
-            } else {
-                val seq = repo.sync()
-                _folders.value = repo.listFolders()
-                reloadNotes()
-                "Synchronisé (seq $seq)"
-            }
+    /** Manual sync (indicator tap / drawer): shows a snackbar. */
+    fun sync() = syncNow(auto = false)
+
+    /** Sync on app foreground. */
+    fun onForeground() = syncNow(auto = true)
+
+    /** Debounced automatic sync after the last edit. */
+    private fun scheduleAutoSync() {
+        pendingAutoSync?.cancel()
+        pendingAutoSync = viewModelScope.launch {
+            delay(AUTO_SYNC_DEBOUNCE_MS)
+            syncNow(auto = true)
+        }
+    }
+
+    /**
+     * One guarded sync path. Automatic syncs are silent (no snackbar) and quiet
+     * on failure — only the [syncState] indicator reflects them.
+     */
+    private fun syncNow(auto: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+        if (!repo.isEnrolled()) {
+            if (!auto) _status.value = "Appareil non associé"
+            return@launch
+        }
+        if (!syncMutex.tryLock()) return@launch // a sync is already running
+        _syncState.value = SyncState.Syncing
+        try {
+            val seq = repo.sync()
+            _folders.value = repo.listFolders()
+            reloadNotes()
+            _syncState.value = SyncState.UpToDate
+            if (!auto) _status.value = "Synchronisé (seq $seq)"
         } catch (e: Exception) {
-            "Échec de la synchronisation : ${e.message}"
+            _syncState.value = SyncState.Offline
+            if (!auto) _status.value = "Échec de la synchronisation : ${e.message}"
+        } finally {
+            syncMutex.unlock()
         }
     }
 
