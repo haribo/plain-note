@@ -127,6 +127,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // Periodic background sync (runs in the app process).
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // QR scanning for device pairing (self-contained, no Google Play Services).
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
