@@ -915,12 +915,50 @@ fn subtree_note_count(
 // --- Markdown formatting transforms (pure, unit-tested) ---
 
 /// Wrap `text` with `marker`, or unwrap it if already wrapped (toggle).
-fn wrap_or_unwrap(text: &str, marker: &str) -> String {
-    if text.len() >= 2 * marker.len() && text.starts_with(marker) && text.ends_with(marker) {
-        text[marker.len()..text.len() - marker.len()].to_string()
+/// Toggle an inline `marker` (`**`, `*`, `` ` ``, `~~`) around the char range
+/// `[start, end)` of `text`. Operates on the FULL text so it detects markers
+/// sitting just *outside* the selection — which is what makes un-styling work
+/// when the markers are hidden in the WYSIWYG view (the user selects only the
+/// visible content). Returns the new text and the new selection (char offsets),
+/// placed on the content.
+fn toggle_wrap(text: &str, start: usize, end: usize, marker: &str) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let mc: Vec<char> = marker.chars().collect();
+    let m = mc.len();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+
+    // Markers immediately outside the selection (hidden-marker case).
+    let outside = start >= m
+        && end + m <= n
+        && chars[start - m..start] == mc[..]
+        && chars[end..end + m] == mc[..];
+    // Markers inside the selection (it includes them).
+    let inside =
+        end >= start + 2 * m && chars[start..start + m] == mc[..] && chars[end - m..end] == mc[..];
+
+    let mut out: Vec<char> = Vec::new();
+    let (ns, ne);
+    if outside {
+        out.extend_from_slice(&chars[..start - m]);
+        out.extend_from_slice(&chars[start..end]);
+        out.extend_from_slice(&chars[end + m..]);
+        (ns, ne) = (start - m, end - m);
+    } else if inside {
+        out.extend_from_slice(&chars[..start]);
+        out.extend_from_slice(&chars[start + m..end - m]);
+        out.extend_from_slice(&chars[end..]);
+        (ns, ne) = (start, end - 2 * m);
     } else {
-        format!("{marker}{text}{marker}")
+        out.extend_from_slice(&chars[..start]);
+        out.extend_from_slice(&mc);
+        out.extend_from_slice(&chars[start..end]);
+        out.extend_from_slice(&mc);
+        out.extend_from_slice(&chars[end..]);
+        (ns, ne) = (start + m, end + m);
     }
+    (out.into_iter().collect(), ns, ne)
 }
 
 /// The heading level of a line (1..=6), or 0 if it is not a heading.
@@ -1488,22 +1526,15 @@ fn sel_bounds(b: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
 
 /// Wrap/unwrap the selection with an inline `marker` (e.g. `**`, `*`, `` ` ``).
 fn apply_wrap(b: &gtk::TextBuffer, marker: &str) {
-    let (mut s, mut e) = sel_bounds(b);
-    let off = s.offset();
-    let text = b.text(&s, &e, false).to_string();
-    let empty = text.is_empty();
-    let new = wrap_or_unwrap(&text, marker);
-    b.delete(&mut s, &mut e);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    if empty {
-        let cur = b.iter_at_offset(off + marker.chars().count() as i32);
-        b.place_cursor(&cur);
-    } else {
-        let a = b.iter_at_offset(off);
-        let z = b.iter_at_offset(off + new.chars().count() as i32);
-        b.select_range(&a, &z);
-    }
+    let (s, e) = sel_bounds(b);
+    let (start, end) = (s.offset() as usize, e.offset() as usize);
+    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let (new_text, ns, ne) = toggle_wrap(&full, start, end, marker);
+    // Replace the whole buffer; `changed` re-runs the WYSIWYG styling.
+    b.set_text(&new_text);
+    let a = b.iter_at_offset(ns as i32);
+    let z = b.iter_at_offset(ne as i32);
+    b.select_range(&a, &z);
 }
 
 /// Apply a per-line transform to every line the selection spans.
@@ -2357,7 +2388,7 @@ fn install_css() {
 mod tests {
     use super::{
         Span, SpanKind, count_text, inline_spans, md_to_pango, parse_expanded, serialize_expanded,
-        set_heading_line, subtree_note_count, toggle_line_prefix, wrap_or_unwrap,
+        set_heading_line, subtree_note_count, toggle_line_prefix, toggle_wrap,
     };
     use std::collections::HashSet;
 
@@ -2456,11 +2487,52 @@ mod tests {
     }
 
     #[test]
-    fn wrap_and_unwrap_toggles() {
-        assert_eq!(wrap_or_unwrap("gras", "**"), "**gras**");
-        assert_eq!(wrap_or_unwrap("**gras**", "**"), "gras");
-        assert_eq!(wrap_or_unwrap("", "*"), "**");
-        assert_eq!(wrap_or_unwrap("x", "`"), "`x`");
+    fn toggle_wrap_wraps_a_selection() {
+        // Select "gras" (3..7) in "un gras ici" -> bold it, selection on content.
+        assert_eq!(
+            toggle_wrap("un gras ici", 3, 7, "**"),
+            ("un **gras** ici".to_string(), 5, 9),
+        );
+        // Empty selection -> insert the markers, caret between them.
+        assert_eq!(toggle_wrap("ab", 1, 1, "**"), ("a****b".to_string(), 3, 3));
+        assert_eq!(toggle_wrap("x", 0, 1, "`"), ("`x`".to_string(), 1, 2));
+    }
+
+    #[test]
+    fn toggle_wrap_unwraps_when_markers_are_outside_the_selection() {
+        // Regression: markers hidden, user selects only the visible content
+        // "gras" (5..9) of "un **gras** ici". Un-bold must strip the markers and
+        // leave no orphan `**` — this was the reported bug.
+        assert_eq!(
+            toggle_wrap("un **gras** ici", 5, 9, "**"),
+            ("un gras ici".to_string(), 3, 7),
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_unwraps_when_selection_includes_markers() {
+        assert_eq!(
+            toggle_wrap("un **gras** ici", 3, 11, "**"),
+            ("un gras ici".to_string(), 3, 7),
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_round_trips() {
+        let (bolded, s, e) = toggle_wrap("un gras ici", 3, 7, "**");
+        assert_eq!(
+            toggle_wrap(&bolded, s, e, "**"),
+            ("un gras ici".to_string(), 3, 7)
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_uses_char_offsets() {
+        // "é gras" — accents are one char; unwrap the already-bold "gras".
+        assert_eq!(
+            toggle_wrap("é **gras** ici", 4, 8, "**"),
+            ("é gras ici".to_string(), 2, 6),
+        );
     }
 
     #[test]
