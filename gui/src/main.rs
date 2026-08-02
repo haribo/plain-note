@@ -624,6 +624,7 @@ enum SpanKind {
     H3,
     Link,
     Quote,
+    CodeBlock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -760,9 +761,27 @@ fn heading_prefix(line: &str) -> Option<(u8, usize)> {
 fn spans(text: &str) -> Vec<Span> {
     let mut out = Vec::new();
     let mut base = 0usize; // char offset of the current line's start
+    let mut in_code = false; // inside a ``` fenced block
     for line in text.split('\n') {
         let ll = line.chars().count();
-        if let Some((level, prefix)) = heading_prefix(line) {
+        if line.starts_with("```") {
+            // Fence line (with optional language): hidden; toggles code state.
+            out.push(Span {
+                start: base,
+                end: base + ll,
+                kind: SpanKind::Hidden,
+            });
+            in_code = !in_code;
+        } else if in_code {
+            // Verbatim: monospace, no inline/heading/quote parsing.
+            if ll > 0 {
+                out.push(Span {
+                    start: base,
+                    end: base + ll,
+                    kind: SpanKind::CodeBlock,
+                });
+            }
+        } else if let Some((level, prefix)) = heading_prefix(line) {
             out.push(Span {
                 start: base,
                 end: base + prefix,
@@ -1789,6 +1808,11 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .style(gtk::pango::Style::Italic)
         .left_margin(24)
         .build();
+    // Fenced code: monospace and indented so the block reads apart from prose.
+    let tag_code_block = gtk::TextTag::builder()
+        .family("monospace")
+        .left_margin(24)
+        .build();
     let all_tags = [
         &tag_bold,
         &tag_italic,
@@ -1800,6 +1824,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         &tag_h3,
         &tag_link,
         &tag_quote,
+        &tag_code_block,
     ];
     for t in all_tags {
         buffer.tag_table().add(t);
@@ -1834,6 +1859,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
                     SpanKind::H3 => 7,
                     SpanKind::Link => 8,
                     SpanKind::Quote => 9,
+                    SpanKind::CodeBlock => 10,
                 };
                 buffer.apply_tag(&tags[idx], &a, &b);
             }
@@ -2524,6 +2550,43 @@ mod tests {
                 span(7, 9, Hidden),
                 span(9, 13, Bold),
                 span(13, 15, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn spans_hides_code_fences_and_marks_content() {
+        use SpanKind::*;
+        // "```\ncode\n```": fences hidden, the line between kept as CodeBlock.
+        assert_eq!(
+            spans("```\ncode\n```"),
+            vec![
+                span(0, 3, Hidden),
+                span(4, 8, CodeBlock),
+                span(9, 12, Hidden)
+            ],
+        );
+        // A language spec on the opening fence is hidden with it.
+        assert_eq!(
+            spans("```rust\nx\n```"),
+            vec![
+                span(0, 7, Hidden),
+                span(8, 9, CodeBlock),
+                span(10, 13, Hidden)
+            ],
+        );
+    }
+
+    #[test]
+    fn spans_code_block_suppresses_inline_and_headings() {
+        use SpanKind::*;
+        // Inside a fence, `#`/`**` are verbatim: no heading or bold spans.
+        assert_eq!(
+            spans("```\n# not a heading **x**\n```"),
+            vec![
+                span(0, 3, Hidden),
+                span(4, 25, CodeBlock),
+                span(26, 29, Hidden),
             ],
         );
     }
