@@ -7,6 +7,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import dev.plainnote.app.data.SyncWorker
+import java.util.concurrent.TimeUnit
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -29,6 +36,7 @@ class MainActivity : ComponentActivity() {
                 if (event == Lifecycle.Event.ON_START) vm.onForeground()
             },
         )
+        scheduleBackgroundSync()
         setContent {
             val colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
             MaterialTheme(colorScheme = colors) {
@@ -37,5 +45,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Enqueue the periodic background sync once (kept across launches). */
+    private fun scheduleBackgroundSync() {
+        val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
+            .setConstraints(
+                Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
+            )
+            .build()
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+            "auto-sync",
+            ExistingPeriodicWorkPolicy.KEEP,
+            work,
+        )
     }
 }

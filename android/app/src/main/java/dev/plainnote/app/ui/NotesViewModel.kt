@@ -3,7 +3,7 @@ package dev.plainnote.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import dev.plainnote.app.data.NoteRepository
+import dev.plainnote.app.data.AppGraph
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
@@ -28,7 +28,7 @@ private const val AUTO_SYNC_DEBOUNCE_MS = 3_000L
  */
 class NotesViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val repo = NoteRepository(app)
+    private val repo = AppGraph.repository(app)
 
     private val _notes = MutableStateFlow<List<NoteSummary>>(emptyList())
     val notes = _notes.asStateFlow()
