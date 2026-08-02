@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/plane.svg" alt="Plain Note" width="96" height="84">
+</p>
+
 # Plain Note
 
 Open-source, cross-platform note manager with **end-to-end encrypted**
