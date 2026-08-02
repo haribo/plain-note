@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -20,6 +21,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
@@ -34,6 +37,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -176,6 +180,7 @@ private fun AppDrawer(vm: NotesViewModel, onClose: () -> Unit) {
 private fun NoteListScreen(vm: NotesViewModel, onMenu: () -> Unit) {
     val notes by vm.notes.collectAsState()
     val status by vm.status.collectAsState()
+    val syncState by vm.syncState.collectAsState()
     val query by vm.query.collectAsState()
     val current by vm.currentFolder.collectAsState()
     val folders by vm.folders.collectAsState()
@@ -202,9 +207,7 @@ private fun NoteListScreen(vm: NotesViewModel, onMenu: () -> Unit) {
                     }
                 },
                 actions = {
-                    IconButton(onClick = { vm.sync() }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Synchroniser")
-                    }
+                    SyncIndicator(syncState) { vm.sync() }
                     IconButton(onClick = { showPairing = true }) {
                         Icon(Icons.Filled.Link, contentDescription = "Associer")
                     }
@@ -290,6 +293,23 @@ private fun NoteListScreen(vm: NotesViewModel, onMenu: () -> Unit) {
                 vm.pair(blob)
             },
         )
+    }
+}
+
+/** Discreet sync status in the top bar; tapping forces a manual sync. */
+@Composable
+private fun SyncIndicator(state: SyncState, onClick: () -> Unit) {
+    val tint = MaterialTheme.colorScheme.onSurfaceVariant
+    IconButton(onClick = onClick) {
+        when (state) {
+            SyncState.Syncing -> CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                strokeWidth = 2.dp,
+                color = tint,
+            )
+            SyncState.Offline -> Icon(Icons.Filled.CloudOff, "Hors ligne — synchroniser", tint = tint)
+            else -> Icon(Icons.Filled.CloudDone, "À jour — synchroniser", tint = tint)
+        }
     }
 }
 
