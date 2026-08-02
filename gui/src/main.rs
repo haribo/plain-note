@@ -935,6 +935,85 @@ fn toggle_line_prefix(line: &str, prefix: &str) -> String {
     }
 }
 
+/// Char offset of the start of the line containing `pos`.
+fn line_start(chars: &[char], pos: usize) -> usize {
+    let mut i = pos.min(chars.len());
+    while i > 0 && chars[i - 1] != '\n' {
+        i -= 1;
+    }
+    i
+}
+
+/// Char offset of the end of the line containing `pos` (before the next `\n`).
+fn line_end(chars: &[char], pos: usize) -> usize {
+    let mut i = pos.min(chars.len());
+    while i < chars.len() && chars[i] != '\n' {
+        i += 1;
+    }
+    i
+}
+
+/// Apply a per-line transform to every line the char range `[start, end)` spans
+/// (expanded to whole lines). Returns the new text and the selection covering
+/// the transformed block. Pure core of `transform_lines`.
+fn transform_block(
+    text: &str,
+    start: usize,
+    end: usize,
+    f: impl Fn(&str) -> String,
+) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+    let bs = line_start(&chars, start);
+    let be = line_end(&chars, end);
+    let block: String = chars[bs..be].iter().collect();
+    let new: String = block.split('\n').map(f).collect::<Vec<_>>().join("\n");
+    let mut out: String = chars[..bs].iter().collect();
+    out.push_str(&new);
+    out.extend(chars[be..].iter());
+    (out, bs, bs + new.chars().count())
+}
+
+/// Wrap the char range `[start, end)` in a fenced code block. Returns the new
+/// text and a caret position on the content line. Pure core of `apply_code_block`.
+fn code_block(text: &str, start: usize, end: usize) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+    let sel: String = chars[start..end].iter().collect();
+    let inserted = format!("```\n{sel}\n```");
+    let mut out: String = chars[..start].iter().collect();
+    out.push_str(&inserted);
+    out.extend(chars[end..].iter());
+    let caret = start + 4 + sel.chars().count(); // after "```\n" + selection
+    (out, caret, caret)
+}
+
+/// Insert a Markdown link around the char range `[start, end)` (its text becomes
+/// the label, or "texte" if empty). Returns the new text and the selection over
+/// the `url` placeholder. Pure core of `apply_link`.
+fn insert_link(text: &str, start: usize, end: usize) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+    let sel: String = chars[start..end].iter().collect();
+    let label = if sel.is_empty() {
+        "texte".to_string()
+    } else {
+        sel
+    };
+    let inserted = format!("[{label}](url)");
+    let mut out: String = chars[..start].iter().collect();
+    out.push_str(&inserted);
+    out.extend(chars[end..].iter());
+    let url_start = start + 1 + label.chars().count() + 2; // after "[label]("
+    (out, url_start, url_start + 3)
+}
+
 /// A French word/character summary, e.g. "42 mots · 210 caractères".
 fn count_text(text: &str) -> String {
     let words = text.split_whitespace().count();
@@ -1456,11 +1535,15 @@ fn sel_bounds(b: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
 /// Wrap/unwrap the selection with an inline `marker` (e.g. `**`, `*`, `` ` ``).
 fn apply_wrap(b: &gtk::TextBuffer, marker: &str) {
     let (s, e) = sel_bounds(b);
-    let (start, end) = (s.offset() as usize, e.offset() as usize);
     let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
-    let (new_text, ns, ne) = toggle_wrap(&full, start, end, marker);
-    // Replace the whole buffer; `changed` re-runs the WYSIWYG styling.
-    b.set_text(&new_text);
+    let (new_text, ns, ne) = toggle_wrap(&full, s.offset() as usize, e.offset() as usize, marker);
+    replace_and_select(b, &new_text, ns, ne);
+}
+
+/// Replace the whole buffer with `new_text` and select `[ns, ne)` (char offsets).
+/// `changed` re-runs the WYSIWYG styling.
+fn replace_and_select(b: &gtk::TextBuffer, new_text: &str, ns: usize, ne: usize) {
+    b.set_text(new_text);
     let a = b.iter_at_offset(ns as i32);
     let z = b.iter_at_offset(ne as i32);
     b.select_range(&a, &z);
@@ -1469,54 +1552,25 @@ fn apply_wrap(b: &gtk::TextBuffer, marker: &str) {
 /// Apply a per-line transform to every line the selection spans.
 fn transform_lines(b: &gtk::TextBuffer, f: impl Fn(&str) -> String) {
     let (s, e) = sel_bounds(b);
-    let (first, last) = (s.line(), e.line());
-    let Some(mut ls) = b.iter_at_line(first) else {
-        return;
-    };
-    let Some(mut le) = b.iter_at_line(last) else {
-        return;
-    };
-    le.forward_to_line_end();
-    let off = ls.offset();
-    let block = b.text(&ls, &le, false).to_string();
-    let new = block.split('\n').map(f).collect::<Vec<_>>().join("\n");
-    b.delete(&mut ls, &mut le);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    let a = b.iter_at_offset(off);
-    let z = b.iter_at_offset(off + new.chars().count() as i32);
-    b.select_range(&a, &z);
+    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let (new_text, ns, ne) = transform_block(&full, s.offset() as usize, e.offset() as usize, f);
+    replace_and_select(b, &new_text, ns, ne);
 }
 
 /// Insert a fenced code block around the selection.
 fn apply_code_block(b: &gtk::TextBuffer) {
-    let (mut s, mut e) = sel_bounds(b);
-    let off = s.offset();
-    let text = b.text(&s, &e, false).to_string();
-    let new = format!("```\n{text}\n```");
-    b.delete(&mut s, &mut e);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    // Place the cursor on the (possibly empty) content line.
-    let cur = b.iter_at_offset(off + 4 + text.chars().count() as i32);
-    b.place_cursor(&cur);
+    let (s, e) = sel_bounds(b);
+    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let (new_text, ns, ne) = code_block(&full, s.offset() as usize, e.offset() as usize);
+    replace_and_select(b, &new_text, ns, ne);
 }
 
 /// Insert a Markdown link, selecting the `url` placeholder for quick typing.
 fn apply_link(b: &gtk::TextBuffer) {
-    let (mut s, mut e) = sel_bounds(b);
-    let off = s.offset();
-    let text = b.text(&s, &e, false).to_string();
-    let label = if text.is_empty() { "texte" } else { &text };
-    let new = format!("[{label}](url)");
-    b.delete(&mut s, &mut e);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    // "url" sits after "[label](".
-    let url_start = off + 1 + label.chars().count() as i32 + 2;
-    let a = b.iter_at_offset(url_start);
-    let z = b.iter_at_offset(url_start + 3);
-    b.select_range(&a, &z);
+    let (s, e) = sel_bounds(b);
+    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let (new_text, ns, ne) = insert_link(&full, s.offset() as usize, e.offset() as usize);
+    replace_and_select(b, &new_text, ns, ne);
 }
 
 /// A formatting toolbar bound to one editor's text view. Buttons return focus
@@ -2305,9 +2359,9 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Span, SpanKind, count_text, heading_prefix, inline_spans, parse_expanded,
-        serialize_expanded, set_heading_line, spans, subtree_note_count, toggle_line_prefix,
-        toggle_wrap,
+        Span, SpanKind, code_block, count_text, heading_level_of, heading_prefix, inline_spans,
+        insert_link, parse_expanded, serialize_expanded, set_heading_line, spans,
+        subtree_note_count, toggle_line_prefix, toggle_wrap, transform_block,
     };
     use std::collections::HashSet;
 
@@ -2506,6 +2560,63 @@ mod tests {
         assert_eq!(toggle_line_prefix("- item", "- "), "item"); // off
         assert_eq!(toggle_line_prefix("- item", "1. "), "1. item"); // replace marker
         assert_eq!(toggle_line_prefix("1. item", "> "), "> item");
+    }
+
+    #[test]
+    fn line_prefix_removes_ordered_and_quote_and_strips_star() {
+        assert_eq!(toggle_line_prefix("1. a", "1. "), "a"); // remove ordered
+        assert_eq!(toggle_line_prefix("> a", "> "), "a"); // remove quote
+        assert_eq!(toggle_line_prefix("* a", "> "), "> a"); // strip `* `, add quote
+        assert_eq!(toggle_line_prefix("3. a", "- "), "- a"); // strip `N. `, add bullet
+    }
+
+    #[test]
+    fn heading_level_of_reads_the_level() {
+        assert_eq!(heading_level_of("## Titre"), 2);
+        assert_eq!(heading_level_of("###### x"), 6);
+        assert_eq!(heading_level_of("#no-space"), 0);
+        assert_eq!(heading_level_of("plain"), 0);
+    }
+
+    #[test]
+    fn toggle_wrap_handles_italic_and_strike() {
+        assert_eq!(
+            toggle_wrap("un mot", 3, 6, "*"),
+            ("un *mot*".to_string(), 4, 7)
+        );
+        assert_eq!(
+            toggle_wrap("un *mot*", 4, 7, "*"),
+            ("un mot".to_string(), 3, 6)
+        );
+        assert_eq!(
+            toggle_wrap("un ~~mot~~", 5, 8, "~~"),
+            ("un mot".to_string(), 3, 6)
+        );
+    }
+
+    #[test]
+    fn transform_block_applies_over_spanned_lines() {
+        assert_eq!(
+            transform_block("a\nb", 0, 3, |l| format!("- {l}")),
+            ("- a\n- b".to_string(), 0, 7),
+        );
+        // No real selection: only the line under the caret is transformed.
+        assert_eq!(
+            transform_block("x\ny\nz", 2, 2, |l| format!("> {l}")),
+            ("x\n> y\nz".to_string(), 2, 5),
+        );
+    }
+
+    #[test]
+    fn code_block_wraps_the_selection() {
+        assert_eq!(code_block("hi", 0, 2), ("```\nhi\n```".to_string(), 6, 6));
+        assert_eq!(code_block("", 0, 0), ("```\n\n```".to_string(), 4, 4));
+    }
+
+    #[test]
+    fn insert_link_uses_label_or_placeholder() {
+        assert_eq!(insert_link("", 0, 0), ("[texte](url)".to_string(), 8, 11));
+        assert_eq!(insert_link("ab", 0, 2), ("[ab](url)".to_string(), 5, 8));
     }
 
     #[test]
