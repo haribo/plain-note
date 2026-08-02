@@ -1,5 +1,6 @@
 package dev.plainnote.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -39,10 +40,12 @@ import androidx.compose.material.icons.filled.Label
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -73,6 +76,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteSummary
 import androidx.compose.runtime.Composable
@@ -673,16 +678,50 @@ private fun TagDialog(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
 @Composable
 private fun PairingDialog(onDismiss: () -> Unit, onPair: (String) -> Unit) {
     var blob by remember { mutableStateOf("") }
+    // ZXing scanner (handles the camera permission prompt itself). A non-null
+    // result means a QR was decoded — use it as the pairing blob.
+    val scan = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { onPair(it.trim()) }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Associer l'appareil") },
+        title = { Text("Associer un appareil") },
         text = {
-            OutlinedTextField(
-                value = blob,
-                onValueChange = { blob = it },
-                label = { Text("Code d'appairage") },
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Column {
+                Text(
+                    "Scannez le QR affiché par un appareil déjà connecté à votre groupe.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = {
+                        scan.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setPrompt("Visez le QR affiché sur l'autre appareil")
+                                .setBeepEnabled(false)
+                                .setOrientationLocked(false),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+                ) {
+                    Icon(Icons.Filled.QrCodeScanner, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Scanner un QR")
+                }
+                Text(
+                    "ou saisir le code",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 14.dp, bottom = 4.dp),
+                )
+                OutlinedTextField(
+                    value = blob,
+                    onValueChange = { blob = it },
+                    label = { Text("Code d'appairage") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         },
         confirmButton = {
             TextButton(onClick = { onPair(blob.trim()) }, enabled = blob.isNotBlank()) {
