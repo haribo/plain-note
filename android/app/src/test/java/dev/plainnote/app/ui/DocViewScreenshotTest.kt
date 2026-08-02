@@ -3,8 +3,6 @@ package dev.plainnote.app.ui
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
@@ -50,7 +48,7 @@ class DocViewScreenshotTest {
 
     private fun capture(dark: Boolean, path: String) {
         compose.setContent {
-            MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+            MaterialTheme(colorScheme = if (dark) DarkColors else LightColors) {
                 Surface { DocLines(sample, Modifier.fillMaxWidth()) }
             }
         }

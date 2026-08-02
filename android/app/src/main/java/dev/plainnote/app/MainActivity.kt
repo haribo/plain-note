@@ -17,9 +17,9 @@ import java.util.concurrent.TimeUnit
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import dev.plainnote.app.ui.AppRoot
+import dev.plainnote.app.ui.DarkColors
+import dev.plainnote.app.ui.LightColors
 import dev.plainnote.app.ui.NotesViewModel
 
 class MainActivity : ComponentActivity() {
@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
         )
         scheduleBackgroundSync()
         setContent {
-            val colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
+            val colors = if (isSystemInDarkTheme()) DarkColors else LightColors
             MaterialTheme(colorScheme = colors) {
                 Surface {
                     AppRoot(vm)
