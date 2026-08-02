@@ -737,6 +737,109 @@ fn md_to_pango(src: &str) -> String {
     out
 }
 
+// --- WYSIWYG inline styling (pure, unit-tested) ---
+
+/// A styled or hidden span over the source, in CHARACTER offsets (GtkTextBuffer
+/// iters use character offsets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    Bold,
+    Italic,
+    Code,
+    Strike,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Span {
+    start: usize,
+    end: usize,
+    kind: SpanKind,
+}
+
+/// Inline Markdown marks → styling spans, with the markers themselves returned
+/// as `Hidden`. Nested marks stack (`***x***` = bold+italic). An unterminated or
+/// empty marker is left literal (no span). Offsets are character indices.
+fn inline_spans(text: &str) -> Vec<Span> {
+    let chars: Vec<char> = text.chars().collect();
+    // Longest markers first so `***`/`**` win over `*`.
+    let markers: [(&str, &[SpanKind]); 5] = [
+        ("***", &[SpanKind::Bold, SpanKind::Italic]),
+        ("**", &[SpanKind::Bold]),
+        ("~~", &[SpanKind::Strike]),
+        ("*", &[SpanKind::Italic]),
+        ("`", &[SpanKind::Code]),
+    ];
+    let mut out = Vec::new();
+    parse_marks(&chars, 0, chars.len(), &markers, &mut out);
+    out
+}
+
+fn matches_at(chars: &[char], i: usize, m: &[char]) -> bool {
+    i + m.len() <= chars.len() && chars[i..i + m.len()] == *m
+}
+
+/// First index >= `from` (with `close + m.len() <= hi`) where marker `m` recurs.
+fn find_close(chars: &[char], from: usize, hi: usize, m: &[char]) -> Option<usize> {
+    let mut j = from;
+    while j + m.len() <= hi {
+        if chars[j..j + m.len()] == *m {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+fn parse_marks(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    markers: &[(&str, &[SpanKind])],
+    out: &mut Vec<Span>,
+) {
+    let mut i = lo;
+    while i < hi {
+        let mut matched = false;
+        for (m, kinds) in markers {
+            let mc: Vec<char> = m.chars().collect();
+            let len = mc.len();
+            if !matches_at(chars, i, &mc) {
+                continue;
+            }
+            // A marker matches only with non-empty content and a close before `hi`.
+            if let Some(c) = find_close(chars, i + len, hi, &mc)
+                && c > i + len
+            {
+                out.push(Span {
+                    start: i,
+                    end: i + len,
+                    kind: SpanKind::Hidden,
+                });
+                for k in *kinds {
+                    out.push(Span {
+                        start: i + len,
+                        end: c,
+                        kind: *k,
+                    });
+                }
+                parse_marks(chars, i + len, c, markers, out);
+                out.push(Span {
+                    start: c,
+                    end: c + len,
+                    kind: SpanKind::Hidden,
+                });
+                i = c + len;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            i += 1;
+        }
+    }
+}
+
 // --- expanded-folders persistence (device-local UI state) ---
 
 /// Path of the device-local file storing the expanded folder ids: `PN_GUI_STATE`
@@ -1591,13 +1694,56 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .build();
 
     let text_view = gtk::TextView::new();
-    text_view.set_monospace(true);
+    // WYSIWYG: proportional text; code spans get a monospace tag instead.
+    text_view.set_monospace(false);
     text_view.set_wrap_mode(gtk::WrapMode::WordChar);
     text_view.set_left_margin(18);
     text_view.set_right_margin(18);
     text_view.set_top_margin(10);
     text_view.set_bottom_margin(18);
     let buffer = text_view.buffer();
+    // WYSIWYG tags: style inline content and hide the Markdown markers. A pure
+    // `inline_spans` computes the ranges; the buffer keeps the Markdown source.
+    let tag_bold = gtk::TextTag::builder().weight(700).build();
+    let tag_italic = gtk::TextTag::builder()
+        .style(gtk::pango::Style::Italic)
+        .build();
+    let tag_code = gtk::TextTag::builder().family("monospace").build();
+    let tag_strike = gtk::TextTag::builder().strikethrough(true).build();
+    let tag_hidden = gtk::TextTag::builder().invisible(true).build();
+    for t in [&tag_bold, &tag_italic, &tag_code, &tag_strike, &tag_hidden] {
+        buffer.tag_table().add(t);
+    }
+    let restyle: std::rc::Rc<dyn Fn()> = std::rc::Rc::new({
+        let buffer = buffer.clone();
+        let tags = (
+            tag_bold.clone(),
+            tag_italic.clone(),
+            tag_code.clone(),
+            tag_strike.clone(),
+            tag_hidden.clone(),
+        );
+        move || {
+            let start = buffer.start_iter();
+            let end = buffer.end_iter();
+            for t in [&tags.0, &tags.1, &tags.2, &tags.3, &tags.4] {
+                buffer.remove_tag(t, &start, &end);
+            }
+            let text = buffer.text(&start, &end, false).to_string();
+            for s in inline_spans(&text) {
+                let a = buffer.iter_at_offset(s.start as i32);
+                let b = buffer.iter_at_offset(s.end as i32);
+                let tag = match s.kind {
+                    SpanKind::Bold => &tags.0,
+                    SpanKind::Italic => &tags.1,
+                    SpanKind::Code => &tags.2,
+                    SpanKind::Strike => &tags.3,
+                    SpanKind::Hidden => &tags.4,
+                };
+                buffer.apply_tag(tag, &a, &b);
+            }
+        }
+    });
     let text_scroll = gtk::ScrolledWindow::builder()
         .child(&text_view)
         .vexpand(true)
@@ -1694,6 +1840,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     title.set_text(&note.title);
     buffer.set_text(&note.text);
     count_label.set_text(&count_text(&note.text));
+    restyle(); // initial WYSIWYG styling of the seeded text
 
     let page = ui.tab_view.append(&editor);
     page.set_title(note_title(&note.title));
@@ -1707,6 +1854,12 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
                 .to_string();
             count_label.set_text(&count_text(&text));
         });
+    }
+
+    // Re-apply WYSIWYG styling on every edit.
+    {
+        let restyle = restyle.clone();
+        buffer.connect_changed(move |_| restyle());
     }
 
     // Title edits -> save + update tab, sidebar row and (if active) the header.
@@ -2203,10 +2356,68 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::{
-        count_text, md_to_pango, parse_expanded, serialize_expanded, set_heading_line,
-        subtree_note_count, toggle_line_prefix, wrap_or_unwrap,
+        Span, SpanKind, count_text, inline_spans, md_to_pango, parse_expanded, serialize_expanded,
+        set_heading_line, subtree_note_count, toggle_line_prefix, wrap_or_unwrap,
     };
     use std::collections::HashSet;
+
+    fn span(start: usize, end: usize, kind: SpanKind) -> Span {
+        Span { start, end, kind }
+    }
+
+    #[test]
+    fn inline_spans_hides_markers_and_styles_content() {
+        use SpanKind::*;
+        assert_eq!(
+            inline_spans("un **gras** ici"),
+            vec![span(3, 5, Hidden), span(5, 9, Bold), span(9, 11, Hidden)],
+        );
+        assert_eq!(
+            inline_spans("a *i* `c`"),
+            vec![
+                span(2, 3, Hidden),
+                span(3, 4, Italic),
+                span(4, 5, Hidden),
+                span(6, 7, Hidden),
+                span(7, 8, Code),
+                span(8, 9, Hidden),
+            ],
+        );
+        assert_eq!(
+            inline_spans("~~x~~"),
+            vec![span(0, 2, Hidden), span(2, 3, Strike), span(3, 5, Hidden)],
+        );
+    }
+
+    #[test]
+    fn inline_spans_stacks_bold_italic() {
+        use SpanKind::*;
+        assert_eq!(
+            inline_spans("***x***"),
+            vec![
+                span(0, 3, Hidden),
+                span(3, 4, Bold),
+                span(3, 4, Italic),
+                span(4, 7, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn inline_spans_leaves_unterminated_literal() {
+        assert_eq!(inline_spans("un **gras"), vec![]);
+        assert_eq!(inline_spans("a * b"), vec![]);
+    }
+
+    #[test]
+    fn inline_spans_uses_char_offsets() {
+        // Accents count as one char each (offsets must be char, not byte).
+        use SpanKind::*;
+        assert_eq!(
+            inline_spans("é **à**"),
+            vec![span(2, 4, Hidden), span(4, 5, Bold), span(5, 7, Hidden)],
+        );
+    }
 
     #[test]
     fn expanded_round_trips() {
