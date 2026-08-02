@@ -10,6 +10,10 @@ export HOME="$work" DISPLAY=:99 PN_STORE="$work/store.automerge"
 cat > "$work/ed" <<'BODY'
 #!/bin/sh
 cat > "$1" <<'TXT'
+# Réunion produit
+## Sous-titre
+### Section
+
 Un point **très important** et de l'*italique* et du `code`, plus ~~barré~~.
 
 un **marqueur pas fermé

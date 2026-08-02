@@ -748,6 +748,9 @@ enum SpanKind {
     Code,
     Strike,
     Hidden,
+    H1,
+    H2,
+    H3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -838,6 +841,61 @@ fn parse_marks(
             i += 1;
         }
     }
+}
+
+/// A heading prefix (`#`..`######` + space): returns the level (capped at 3 for
+/// the editor) and the prefix length in chars (hashes + the space).
+fn heading_prefix(line: &str) -> Option<(u8, usize)> {
+    let hashes = line.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && line.chars().nth(hashes) == Some(' ') {
+        return Some((hashes.min(3) as u8, hashes + 1));
+    }
+    None
+}
+
+/// All WYSIWYG spans over the full text (char offsets): heading prefixes hidden
+/// and their content sized (H1/H2/H3), plus inline marks (markers hidden).
+fn spans(text: &str) -> Vec<Span> {
+    let mut out = Vec::new();
+    let mut base = 0usize; // char offset of the current line's start
+    for line in text.split('\n') {
+        let ll = line.chars().count();
+        if let Some((level, prefix)) = heading_prefix(line) {
+            out.push(Span {
+                start: base,
+                end: base + prefix,
+                kind: SpanKind::Hidden,
+            });
+            let kind = match level {
+                1 => SpanKind::H1,
+                2 => SpanKind::H2,
+                _ => SpanKind::H3,
+            };
+            out.push(Span {
+                start: base + prefix,
+                end: base + ll,
+                kind,
+            });
+            let content: String = line.chars().skip(prefix).collect();
+            for s in inline_spans(&content) {
+                out.push(Span {
+                    start: base + prefix + s.start,
+                    end: base + prefix + s.end,
+                    kind: s.kind,
+                });
+            }
+        } else {
+            for s in inline_spans(line) {
+                out.push(Span {
+                    start: base + s.start,
+                    end: base + s.end,
+                    kind: s.kind,
+                });
+            }
+        }
+        base += ll + 1; // account for the '\n'
+    }
+    out
 }
 
 // --- expanded-folders persistence (device-local UI state) ---
@@ -1742,36 +1800,46 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     let tag_code = gtk::TextTag::builder().family("monospace").build();
     let tag_strike = gtk::TextTag::builder().strikethrough(true).build();
     let tag_hidden = gtk::TextTag::builder().invisible(true).build();
-    for t in [&tag_bold, &tag_italic, &tag_code, &tag_strike, &tag_hidden] {
+    let tag_h1 = gtk::TextTag::builder().weight(800).scale(1.6).build();
+    let tag_h2 = gtk::TextTag::builder().weight(800).scale(1.3).build();
+    let tag_h3 = gtk::TextTag::builder().weight(800).scale(1.15).build();
+    let all_tags = [
+        &tag_bold,
+        &tag_italic,
+        &tag_code,
+        &tag_strike,
+        &tag_hidden,
+        &tag_h1,
+        &tag_h2,
+        &tag_h3,
+    ];
+    for t in all_tags {
         buffer.tag_table().add(t);
     }
     let restyle: std::rc::Rc<dyn Fn()> = std::rc::Rc::new({
         let buffer = buffer.clone();
-        let tags = (
-            tag_bold.clone(),
-            tag_italic.clone(),
-            tag_code.clone(),
-            tag_strike.clone(),
-            tag_hidden.clone(),
-        );
+        let tags: Vec<gtk::TextTag> = all_tags.iter().map(|t| (*t).clone()).collect();
         move || {
             let start = buffer.start_iter();
             let end = buffer.end_iter();
-            for t in [&tags.0, &tags.1, &tags.2, &tags.3, &tags.4] {
+            for t in &tags {
                 buffer.remove_tag(t, &start, &end);
             }
             let text = buffer.text(&start, &end, false).to_string();
-            for s in inline_spans(&text) {
+            for s in spans(&text) {
                 let a = buffer.iter_at_offset(s.start as i32);
                 let b = buffer.iter_at_offset(s.end as i32);
-                let tag = match s.kind {
-                    SpanKind::Bold => &tags.0,
-                    SpanKind::Italic => &tags.1,
-                    SpanKind::Code => &tags.2,
-                    SpanKind::Strike => &tags.3,
-                    SpanKind::Hidden => &tags.4,
+                let idx = match s.kind {
+                    SpanKind::Bold => 0,
+                    SpanKind::Italic => 1,
+                    SpanKind::Code => 2,
+                    SpanKind::Strike => 3,
+                    SpanKind::Hidden => 4,
+                    SpanKind::H1 => 5,
+                    SpanKind::H2 => 6,
+                    SpanKind::H3 => 7,
                 };
-                buffer.apply_tag(tag, &a, &b);
+                buffer.apply_tag(&tags[idx], &a, &b);
             }
         }
     });
@@ -2387,8 +2455,9 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Span, SpanKind, count_text, inline_spans, md_to_pango, parse_expanded, serialize_expanded,
-        set_heading_line, subtree_note_count, toggle_line_prefix, toggle_wrap,
+        Span, SpanKind, count_text, heading_prefix, inline_spans, md_to_pango, parse_expanded,
+        serialize_expanded, set_heading_line, spans, subtree_note_count, toggle_line_prefix,
+        toggle_wrap,
     };
     use std::collections::HashSet;
 
@@ -2438,6 +2507,44 @@ mod tests {
     fn inline_spans_leaves_unterminated_literal() {
         assert_eq!(inline_spans("un **gras"), vec![]);
         assert_eq!(inline_spans("a * b"), vec![]);
+    }
+
+    #[test]
+    fn heading_prefix_detects_level_and_caps_at_3() {
+        assert_eq!(heading_prefix("# Titre"), Some((1, 2)));
+        assert_eq!(heading_prefix("### Sous"), Some((3, 4)));
+        assert_eq!(heading_prefix("##### Deep"), Some((3, 6))); // capped at H3
+        assert_eq!(heading_prefix("#pas-espace"), None);
+        assert_eq!(heading_prefix("texte"), None);
+    }
+
+    #[test]
+    fn spans_hides_heading_prefix_and_sizes_content() {
+        use SpanKind::*;
+        assert_eq!(spans("# Titre"), vec![span(0, 2, Hidden), span(2, 7, H1)],);
+        // Heading content keeps its inline marks (offsets shifted past `## `).
+        assert_eq!(
+            spans("## a **b**"),
+            vec![
+                span(0, 3, Hidden),
+                span(3, 10, H2),
+                span(5, 7, Hidden),
+                span(7, 8, Bold),
+                span(8, 10, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn spans_offsets_are_absolute_across_lines() {
+        use SpanKind::*;
+        // Line 0 "a" (no spans), line 1 "# T" starts at char offset 2.
+        assert_eq!(spans("a\n# T"), vec![span(2, 4, Hidden), span(4, 5, H1)]);
+    }
+
+    #[test]
+    fn spans_leaves_plain_lines_to_inline() {
+        assert_eq!(spans("**x**"), inline_spans("**x**"));
     }
 
     #[test]
