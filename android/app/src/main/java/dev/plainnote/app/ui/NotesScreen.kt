@@ -1,6 +1,7 @@
 package dev.plainnote.app.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -8,11 +9,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -21,7 +25,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -51,6 +57,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -62,7 +69,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.DrawerValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteSummary
 import androidx.compose.runtime.Composable
@@ -99,11 +109,21 @@ fun AppRoot(vm: NotesViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppDrawer(vm: NotesViewModel, onClose: () -> Unit) {
     val folders by vm.folders.collectAsState()
     val current by vm.currentFolder.collectAsState()
+    val expanded by vm.expandedFolders.collectAsState()
+    val byParent = remember(folders) { folders.groupBy { it.parent } }
+
+    var newFolderParent by remember { mutableStateOf<FolderInfo?>(null) }
     var showNewFolder by remember { mutableStateOf(false) }
+    var actionFolder by remember { mutableStateOf<FolderInfo?>(null) }
+    var renameTarget by remember { mutableStateOf<FolderInfo?>(null) }
+    var moveTarget by remember { mutableStateOf<FolderInfo?>(null) }
+    var deleteTarget by remember { mutableStateOf<FolderInfo?>(null) }
+
     ModalDrawerSheet {
         Text(
             "Plain Note",
@@ -124,20 +144,21 @@ private fun AppDrawer(vm: NotesViewModel, onClose: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(28.dp, 4.dp),
         )
-        folders.forEach { f ->
-            NavigationDrawerItem(
-                label = { Text(f.path) },
-                icon = { Icon(Icons.Filled.Folder, contentDescription = null) },
-                selected = current?.id == f.id,
-                onClick = { vm.selectFolder(f); onClose() },
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-        }
+        FolderTree(
+            byParent = byParent,
+            parentId = "",
+            depth = 0,
+            expanded = expanded,
+            currentId = current?.id,
+            onSelect = { vm.selectFolder(it); onClose() },
+            onToggle = { vm.toggleFolderExpanded(it.id) },
+            onLongPress = { actionFolder = it },
+        )
         NavigationDrawerItem(
             label = { Text("Nouveau dossier") },
             icon = { Icon(Icons.Filled.Add, contentDescription = null) },
             selected = false,
-            onClick = { showNewFolder = true },
+            onClick = { newFolderParent = null; showNewFolder = true },
             modifier = Modifier.padding(horizontal = 12.dp),
         )
         HorizontalDivider(Modifier.padding(16.dp, 8.dp))
@@ -150,29 +171,226 @@ private fun AppDrawer(vm: NotesViewModel, onClose: () -> Unit) {
         )
     }
 
-    if (showNewFolder) {
-        var name by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showNewFolder = false },
-            title = { Text("Nouveau dossier") },
-            text = {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Nom du dossier") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = { vm.createFolder(name); showNewFolder = false },
-                    enabled = name.isNotBlank(),
-                ) { Text("Créer") }
-            },
-            dismissButton = { TextButton(onClick = { showNewFolder = false }) { Text("Annuler") } },
+    actionFolder?.let { f ->
+        FolderActionsSheet(
+            folder = f,
+            onDismiss = { actionFolder = null },
+            onRename = { actionFolder = null; renameTarget = f },
+            onMove = { actionFolder = null; moveTarget = f },
+            onNewSub = { actionFolder = null; newFolderParent = f; showNewFolder = true },
+            onDelete = { actionFolder = null; deleteTarget = f },
         )
     }
+
+    if (showNewFolder) {
+        val parent = newFolderParent
+        FolderNameDialog(
+            title = if (parent == null) "Nouveau dossier" else "Sous-dossier de « ${parent.name} »",
+            initial = "",
+            confirmLabel = "Créer",
+            onConfirm = { vm.createFolder(it, parent?.id); showNewFolder = false },
+            onDismiss = { showNewFolder = false },
+        )
+    }
+
+    renameTarget?.let { f ->
+        FolderNameDialog(
+            title = "Renommer le dossier",
+            initial = f.name,
+            confirmLabel = "Renommer",
+            onConfirm = { vm.renameFolder(f.id, it); renameTarget = null },
+            onDismiss = { renameTarget = null },
+        )
+    }
+
+    moveTarget?.let { f ->
+        val blocked = remember(f, byParent) { descendantsOf(f.id, byParent) + f.id }
+        MoveFolderDialog(
+            folder = f,
+            candidates = folders.filter { it.id !in blocked },
+            onDismiss = { moveTarget = null },
+            onMove = { parentId -> vm.moveFolder(f.id, parentId); moveTarget = null },
+        )
+    }
+
+    deleteTarget?.let { f ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Supprimer « ${f.name} » ?") },
+            text = { Text("Ses notes et sous-dossiers remontent au parent. Rien n'est mis à la corbeille.") },
+            confirmButton = {
+                TextButton(onClick = { vm.deleteFolder(f.id); deleteTarget = null }) {
+                    Text("Supprimer", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Annuler") } },
+        )
+    }
+}
+
+@Composable
+private fun FolderTree(
+    byParent: Map<String, List<FolderInfo>>,
+    parentId: String,
+    depth: Int,
+    expanded: Set<String>,
+    currentId: String?,
+    onSelect: (FolderInfo) -> Unit,
+    onToggle: (FolderInfo) -> Unit,
+    onLongPress: (FolderInfo) -> Unit,
+) {
+    val children = byParent[parentId].orEmpty().sortedBy { it.name.lowercase() }
+    children.forEach { f ->
+        val hasChildren = !byParent[f.id].isNullOrEmpty()
+        val isExpanded = f.id in expanded
+        FolderRow(f, depth, hasChildren, isExpanded, currentId == f.id, onSelect, onToggle, onLongPress)
+        if (hasChildren && isExpanded) {
+            FolderTree(byParent, f.id, depth + 1, expanded, currentId, onSelect, onToggle, onLongPress)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FolderRow(
+    f: FolderInfo,
+    depth: Int,
+    hasChildren: Boolean,
+    isExpanded: Boolean,
+    selected: Boolean,
+    onSelect: (FolderInfo) -> Unit,
+    onToggle: (FolderInfo) -> Unit,
+    onLongPress: (FolderInfo) -> Unit,
+) {
+    val fg = if (selected) {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(28.dp))
+            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+            .combinedClickable(onClick = { onSelect(f) }, onLongClick = { onLongPress(f) })
+            .padding(start = (4 + depth * 20).dp, top = 10.dp, bottom = 10.dp, end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (hasChildren) {
+            Icon(
+                if (isExpanded) Icons.Filled.ExpandMore else Icons.Filled.ChevronRight,
+                contentDescription = if (isExpanded) "Replier" else "Déplier",
+                tint = fg,
+                modifier = Modifier.size(24.dp).clip(RoundedCornerShape(50)).clickable { onToggle(f) },
+            )
+        } else {
+            Spacer(Modifier.width(24.dp))
+        }
+        Spacer(Modifier.width(6.dp))
+        Icon(Icons.Filled.Folder, contentDescription = null, tint = fg, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(f.name, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FolderActionsSheet(
+    folder: FolderInfo,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onMove: () -> Unit,
+    onNewSub: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Text(
+            folder.name,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(24.dp, 4.dp, 24.dp, 12.dp),
+        )
+        SheetAction(Icons.Filled.Edit, "Renommer", onRename)
+        SheetAction(Icons.Filled.DriveFileMove, "Déplacer vers…", onMove)
+        SheetAction(Icons.Filled.Add, "Nouveau sous-dossier", onNewSub)
+        SheetAction(Icons.Filled.Delete, "Supprimer", onDelete, tint = MaterialTheme.colorScheme.error)
+        Box(Modifier.padding(bottom = 24.dp))
+    }
+}
+
+@Composable
+private fun FolderNameDialog(
+    title: String,
+    initial: String,
+    confirmLabel: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Nom du dossier") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name.trim()) }, enabled = name.isNotBlank()) {
+                Text(confirmLabel)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } },
+    )
+}
+
+@Composable
+private fun MoveFolderDialog(
+    folder: FolderInfo,
+    candidates: List<FolderInfo>,
+    onDismiss: () -> Unit,
+    onMove: (String?) -> Unit,
+) {
+    var target by remember { mutableStateOf<String?>(null) } // null = root
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Déplacer « ${folder.name} » vers") },
+        text = {
+            Column {
+                FolderRadio("Racine", target == null) { target = null }
+                candidates.sortedBy { it.path.lowercase() }.forEach { c ->
+                    FolderRadio(c.path, target == c.id) { target = c.id }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onMove(target) }) { Text("Déplacer") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } },
+    )
+}
+
+@Composable
+private fun FolderRadio(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Text(label)
+    }
+}
+
+/** All folder ids in the subtree rooted at [id] (excluding [id] itself). */
+private fun descendantsOf(id: String, byParent: Map<String, List<FolderInfo>>): Set<String> {
+    val out = mutableSetOf<String>()
+    fun rec(parent: String) {
+        byParent[parent].orEmpty().forEach { out.add(it.id); rec(it.id) }
+    }
+    rec(id)
+    return out
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

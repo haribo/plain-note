@@ -32,7 +32,13 @@ class NoteRepository(context: Context) {
 
     fun listFolders(): List<FolderInfo> = app.listFolders()
 
-    fun createFolder(name: String): String = app.createFolder(name, null)
+    fun createFolder(name: String, parent: String? = null): String = app.createFolder(name, parent)
+
+    fun renameFolder(id: String, name: String) = app.renameFolder(id, name)
+
+    fun moveFolder(id: String, parent: String?) = app.moveFolder(id, parent)
+
+    fun deleteFolder(id: String) = app.deleteFolder(id)
 
     fun createNote(): String = app.createNote()
 
