@@ -20,6 +20,12 @@ Voir [la doc](https://example.org) pour les détails.
 
 > Une citation *importante* à retenir.
 
+- premier point
+- second avec du **gras**
+
+1. étape une
+2. étape deux
+
 ```rust
 let x = 42; // # pas un titre
 ```
