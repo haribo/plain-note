@@ -25,7 +25,13 @@ fi
 raw="$(compare -metric AE -fuzz 4% "$here/golden/editor.png" "$out/editor.png" "$out/diff.png" 2>&1 || true)"
 diff="${raw%% *}"
 echo "differing pixels: $diff"
-if ! [ "$diff" -le 500 ] 2>/dev/null; then
+# The count may be a float on HDRI ImageMagick builds (e.g. "78.8863"), so a
+# shell integer test would error and flag every nonzero diff. Compare as a float.
+if ! [[ "$diff" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "could not parse compare output: $raw"
+  exit 1
+fi
+if ! awk -v d="$diff" 'BEGIN { exit (d <= 500) ? 0 : 1 }'; then
   echo "VISUAL REGRESSION (diff=$diff, threshold 500). Diff at $out/diff.png"
   echo "If the change is intended: tools/gui-screenshot/run.sh record"
   exit 1
