@@ -11,8 +11,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use note_protocol::{
-    ClientMsg, CreateGroupResponse, DeviceListResponse, EnrollRequest, EnrollResponse,
-    PROTOCOL_VERSION, ServerMsg,
+    ClientMsg, CreateGroupResponse, CreateInviteRequest, DeviceListResponse, EnrollRequest,
+    EnrollResponse, PROTOCOL_VERSION, ServerMsg,
 };
 use note_relay::build_app;
 use note_relay::state::AppState;
@@ -475,4 +475,136 @@ async fn attachment_upload_download_and_isolation() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// --- negative / attack paths ---
+
+#[tokio::test]
+async fn ws_rejects_protocol_version_mismatch() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let addr = spawn_server(storage, None).await;
+    let url = format!("ws://{addr}/v1/sync");
+    let (mut ws, _) = connect_async(url.as_str()).await.unwrap();
+    send(
+        &mut ws,
+        ClientMsg::Hello {
+            protocol_version: PROTOCOL_VERSION + 99,
+        },
+    )
+    .await;
+    match recv(&mut ws).await {
+        ServerMsg::Error { code, .. } => assert_eq!(code, "protocol"),
+        other => panic!("expected error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ws_rejects_unknown_device() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let addr = spawn_server(storage, None).await;
+    let url = format!("ws://{addr}/v1/sync");
+    let (mut ws, _) = connect_async(url.as_str()).await.unwrap();
+    send(
+        &mut ws,
+        ClientMsg::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .await;
+    let _ = recv(&mut ws).await; // Challenge
+    send(
+        &mut ws,
+        ClientMsg::Auth {
+            device_id: "00".repeat(16),
+            signature: B64.encode([0u8; 64]),
+        },
+    )
+    .await;
+    match recv(&mut ws).await {
+        ServerMsg::Error { code, .. } => assert_eq!(code, "unauthorized"),
+        other => panic!("expected error, got {other:?}"),
+    }
+}
+
+fn admin_app(admin: &str) -> axum::Router {
+    let storage = Arc::new(InMemoryStorage::new());
+    build_app(AppState::new(storage, Some(admin.to_string())))
+}
+
+#[tokio::test]
+async fn enroll_rejects_bad_invite() {
+    let app = admin_app("secret-admin");
+    let sk = signing_key();
+    let enroll = EnrollRequest {
+        invite_code: "not-a-real-invite".into(),
+        device_pubkey: B64.encode(sk.verifying_key().to_bytes()),
+    };
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/enroll")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&enroll).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_invite_rejects_missing_group() {
+    let app = admin_app("secret-admin");
+    let body = serde_json::to_vec(&CreateInviteRequest {
+        group_id: "deadbeefdeadbeefdeadbeefdeadbeef".into(),
+    })
+    .unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/invites")
+                .header(header::AUTHORIZATION, "Bearer secret-admin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn revoke_rejects_unknown_device() {
+    let app = admin_app("secret-admin");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/devices/deadbeefdeadbeefdeadbeefdeadbeef")
+                .header(header::AUTHORIZATION, "Bearer secret-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_rejects_wrong_token() {
+    let app = admin_app("secret-admin");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/groups")
+                .header(header::AUTHORIZATION, "Bearer WRONG-TOKEN")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

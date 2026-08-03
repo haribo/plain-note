@@ -152,4 +152,130 @@ mod tests {
             _ => panic!("wrong variant"),
         }
     }
+
+    // The wire format is a contract between client and relay; these pin the
+    // exact JSON so a field/variant rename fails CI instead of drifting silently.
+
+    #[test]
+    fn client_msg_tags_are_stable() {
+        assert_eq!(
+            ClientMsg::Hello {
+                protocol_version: 1
+            }
+            .to_json(),
+            r#"{"type":"hello","protocol_version":1}"#
+        );
+        assert_eq!(
+            ClientMsg::Auth {
+                device_id: "d".into(),
+                signature: "s".into()
+            }
+            .to_json(),
+            r#"{"type":"auth","device_id":"d","signature":"s"}"#
+        );
+        assert_eq!(
+            ClientMsg::Push {
+                envelope: "e".into(),
+                client_change_id: "c".into()
+            }
+            .to_json(),
+            r#"{"type":"push","envelope":"e","client_change_id":"c"}"#
+        );
+        assert_eq!(ClientMsg::Ping.to_json(), r#"{"type":"ping"}"#);
+    }
+
+    #[test]
+    fn server_msg_tags_are_stable() {
+        assert_eq!(
+            ServerMsg::Challenge {
+                challenge: "x".into()
+            }
+            .to_json(),
+            r#"{"type":"challenge","challenge":"x"}"#
+        );
+        assert_eq!(
+            ServerMsg::AuthOk {
+                group_id: "g".into(),
+                current_seq: 5
+            }
+            .to_json(),
+            r#"{"type":"auth_ok","group_id":"g","current_seq":5}"#
+        );
+        assert_eq!(
+            ServerMsg::Ack {
+                client_change_id: "c".into(),
+                seq: 2
+            }
+            .to_json(),
+            r#"{"type":"ack","client_change_id":"c","seq":2}"#
+        );
+        assert_eq!(
+            ServerMsg::PullDone { seq: 9 }.to_json(),
+            r#"{"type":"pull_done","seq":9}"#
+        );
+        assert_eq!(ServerMsg::Pong.to_json(), r#"{"type":"pong"}"#);
+        assert_eq!(
+            ServerMsg::Error {
+                code: "bad".into(),
+                message: "nope".into()
+            }
+            .to_json(),
+            r#"{"type":"error","code":"bad","message":"nope"}"#
+        );
+    }
+
+    #[test]
+    fn http_structs_field_names_are_stable() {
+        let cases = [
+            (
+                serde_json::to_string(&EnrollRequest {
+                    invite_code: "i".into(),
+                    device_pubkey: "k".into(),
+                })
+                .unwrap(),
+                r#"{"invite_code":"i","device_pubkey":"k"}"#,
+            ),
+            (
+                serde_json::to_string(&EnrollResponse {
+                    device_id: "d".into(),
+                    group_id: "g".into(),
+                    device_token: "t".into(),
+                })
+                .unwrap(),
+                r#"{"device_id":"d","group_id":"g","device_token":"t"}"#,
+            ),
+            (
+                serde_json::to_string(&CreateGroupResponse {
+                    group_id: "g".into(),
+                    invite_code: "i".into(),
+                })
+                .unwrap(),
+                r#"{"group_id":"g","invite_code":"i"}"#,
+            ),
+            (
+                serde_json::to_string(&CreateInviteRequest {
+                    group_id: "g".into(),
+                })
+                .unwrap(),
+                r#"{"group_id":"g"}"#,
+            ),
+            (
+                serde_json::to_string(&CreateInviteResponse {
+                    invite_code: "i".into(),
+                })
+                .unwrap(),
+                r#"{"invite_code":"i"}"#,
+            ),
+            (
+                serde_json::to_string(&DeviceListResponse {
+                    devices: vec![DeviceInfo { id: "x".into() }],
+                })
+                .unwrap(),
+                r#"{"devices":[{"id":"x"}]}"#,
+            ),
+        ];
+        for (got, want) in cases {
+            assert_eq!(got, want);
+        }
+    }
 }
