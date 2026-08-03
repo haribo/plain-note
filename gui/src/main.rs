@@ -637,6 +637,7 @@ enum SpanKind {
     Link,
     Quote,
     CodeBlock,
+    ListItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -817,6 +818,26 @@ fn spans(text: &str) -> Vec<Span> {
                     kind: s.kind,
                 });
             }
+        } else if let Some((mlen, _)) = line_list_marker(line) {
+            // Hide the source marker; the gutter glyph is drawn by the view.
+            out.push(Span {
+                start: base,
+                end: base + mlen,
+                kind: SpanKind::Hidden,
+            });
+            out.push(Span {
+                start: base,
+                end: base + ll,
+                kind: SpanKind::ListItem, // indent (left_margin) leaves a gutter
+            });
+            let content: String = line.chars().skip(mlen).collect();
+            for s in inline_spans(&content) {
+                out.push(Span {
+                    start: base + mlen + s.start,
+                    end: base + mlen + s.end,
+                    kind: s.kind,
+                });
+            }
         } else if let Some(content) = line.strip_prefix("> ") {
             out.push(Span {
                 start: base,
@@ -895,6 +916,44 @@ fn link_in_line(line: &str, off: usize) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// The leading list marker of `line`, if any: returns its length in chars and
+/// the glyph to draw in the gutter. `- `/`* `/`+ ` render as a bullet; `N. `
+/// keeps the number. The marker itself is hidden in the source; the view draws
+/// the returned glyph in the left gutter.
+fn line_list_marker(line: &str) -> Option<(usize, String)> {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        return Some((2, "•".to_string()));
+    }
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        let rest: String = line.chars().skip(digits).collect();
+        if rest.starts_with(". ") {
+            let num: String = line.chars().take(digits).collect();
+            return Some((digits + 2, format!("{num}.")));
+        }
+    }
+    None
+}
+
+/// For each list line, the char offset of its start (the hidden marker sits at
+/// the paragraph's left edge) and the gutter glyph to draw. Skips ``` fenced
+/// blocks. The view draws the glyph; `spans` hides the source markers in step.
+fn list_markers(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut base = 0usize;
+    let mut in_code = false;
+    for line in text.split('\n') {
+        let ll = line.chars().count();
+        if line.starts_with("```") {
+            in_code = !in_code;
+        } else if !in_code && let Some((_, draw)) = line_list_marker(line) {
+            out.push((base, draw));
+        }
+        base += ll + 1;
+    }
+    out
 }
 
 /// Render `data` as a QR code into an RGBA8 buffer: `scale` pixels per module,
@@ -1838,6 +1897,97 @@ fn open_note(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
 }
 
 /// Build an editor pane for `note`, append it as a tab, and wire its auto-save.
+/// A `GtkTextView` that draws list-item markers (bullets, numbers) in the left
+/// gutter. The buffer keeps the raw Markdown (`- `/`N. `); those markers are
+/// hidden by tags and the glyph is painted here, so the source round-trips and
+/// editing/offsets are unaffected. Decoration is off in raw-source mode.
+mod bullet_view {
+    use super::list_markers;
+    use gtk::glib;
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use std::cell::Cell;
+
+    mod imp {
+        use super::*;
+
+        pub struct BulletTextView {
+            pub decorate: Cell<bool>,
+        }
+
+        impl Default for BulletTextView {
+            fn default() -> Self {
+                Self {
+                    decorate: Cell::new(true),
+                }
+            }
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for BulletTextView {
+            const NAME: &'static str = "PnBulletTextView";
+            type Type = super::BulletTextView;
+            type ParentType = gtk::TextView;
+        }
+
+        impl ObjectImpl for BulletTextView {}
+        impl TextViewImpl for BulletTextView {}
+
+        impl WidgetImpl for BulletTextView {
+            fn snapshot(&self, snapshot: &gtk::Snapshot) {
+                self.parent_snapshot(snapshot);
+                if !self.decorate.get() {
+                    return;
+                }
+                let view = self.obj();
+                let buffer = view.buffer();
+                // Include hidden chars: the markers are invisible, but iters count
+                // them, so offsets must be computed over the full source.
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                    .to_string();
+                let color = view.color();
+                for (offset, marker) in list_markers(&text) {
+                    let iter = buffer.iter_at_offset(offset as i32);
+                    let rect = view.iter_location(&iter);
+                    let (wx, wy) = view.buffer_to_window_coords(
+                        gtk::TextWindowType::Widget,
+                        rect.x(),
+                        rect.y(),
+                    );
+                    let layout = view.create_pango_layout(Some(&marker));
+                    let (lw, _) = layout.pixel_size();
+                    // Right-align the glyph in the gutter, just left of the content.
+                    let x = (wx - 8 - lw).max(0);
+                    snapshot.save();
+                    snapshot.translate(&gtk::graphene::Point::new(x as f32, wy as f32));
+                    snapshot.append_layout(&layout, &color);
+                    snapshot.restore();
+                }
+            }
+        }
+    }
+
+    glib::wrapper! {
+        pub struct BulletTextView(ObjectSubclass<imp::BulletTextView>)
+            @extends gtk::TextView, gtk::Widget,
+            @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Scrollable;
+    }
+
+    impl BulletTextView {
+        pub fn new() -> Self {
+            glib::Object::new()
+        }
+
+        /// Toggle gutter drawing (off when showing raw Markdown source).
+        pub fn set_decorate(&self, on: bool) {
+            self.imp().decorate.set(on);
+            self.queue_draw();
+        }
+    }
+}
+use bullet_view::BulletTextView;
+
 fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note) -> Tab {
     let id = note.id.clone();
 
@@ -1864,7 +2014,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    let text_view = gtk::TextView::new();
+    let text_view = BulletTextView::new();
     // WYSIWYG: proportional text; code spans get a monospace tag instead.
     text_view.set_monospace(false);
     text_view.set_wrap_mode(gtk::WrapMode::WordChar);
@@ -1899,6 +2049,8 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .family("monospace")
         .left_margin(24)
         .build();
+    // List items: indent the paragraph, leaving a gutter for the drawn marker.
+    let tag_list = gtk::TextTag::builder().left_margin(44).build();
     let all_tags = [
         &tag_bold,
         &tag_italic,
@@ -1911,6 +2063,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         &tag_link,
         &tag_quote,
         &tag_code_block,
+        &tag_list,
     ];
     for t in all_tags {
         buffer.tag_table().add(t);
@@ -1946,6 +2099,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
                     SpanKind::Link => 8,
                     SpanKind::Quote => 9,
                     SpanKind::CodeBlock => 10,
+                    SpanKind::ListItem => 11,
                 };
                 buffer.apply_tag(&tags[idx], &a, &b);
             }
@@ -1995,7 +2149,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    let toolbar = format_toolbar(&text_view);
+    let toolbar = format_toolbar(text_view.upcast_ref::<gtk::TextView>());
 
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor.append(&title);
@@ -2009,8 +2163,11 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     {
         let source_mode = source_mode.clone();
         let restyle = restyle.clone();
+        let text_view = text_view.clone();
         source_toggle.connect_toggled(move |btn| {
-            source_mode.set(btn.is_active());
+            let raw = btn.is_active();
+            source_mode.set(raw);
+            text_view.set_decorate(!raw); // no gutter glyphs over raw markers
             restyle();
         });
     }
@@ -2159,7 +2316,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         id: id.clone(),
         page,
         title,
-        text_view,
+        text_view: text_view.upcast(),
         buffer,
         tags_box: tags_box.clone(),
         atts_box: atts_box.clone(),
@@ -3096,6 +3253,46 @@ mod tests {
         // A link inside a fenced block is verbatim, not clickable.
         let c = "```\n[doc](u)\n```";
         assert_eq!(link_at(c, 6), None);
+    }
+
+    #[test]
+    fn line_list_marker_detects_bullets_and_numbers() {
+        use super::line_list_marker;
+        assert_eq!(line_list_marker("- a"), Some((2, "•".to_string())));
+        assert_eq!(line_list_marker("* a"), Some((2, "•".to_string())));
+        assert_eq!(line_list_marker("+ a"), Some((2, "•".to_string())));
+        assert_eq!(line_list_marker("3. b"), Some((3, "3.".to_string())));
+        assert_eq!(line_list_marker("12. b"), Some((4, "12.".to_string())));
+        // No space, wrong punctuation, or plain text → not a list.
+        assert_eq!(line_list_marker("-a"), None);
+        assert_eq!(line_list_marker("1.b"), None);
+        assert_eq!(line_list_marker("1) b"), None);
+        assert_eq!(line_list_marker("word"), None);
+    }
+
+    #[test]
+    fn list_markers_uses_offsets_and_skips_code_blocks() {
+        use super::list_markers;
+        // A bullet on line 0, an ordered item on line 4; the fenced `- b` is
+        // verbatim and yields no marker. Offsets are each line's start.
+        let t = "- a\n```\n- b\n```\n2. c";
+        assert_eq!(
+            list_markers(t),
+            vec![(0, "•".to_string()), (16, "2.".to_string())],
+        );
+    }
+
+    #[test]
+    fn spans_hides_list_markers_and_indents() {
+        use SpanKind::*;
+        assert_eq!(
+            spans("- foo"),
+            vec![span(0, 2, Hidden), span(0, 5, ListItem)]
+        );
+        assert_eq!(
+            spans("2. x"),
+            vec![span(0, 3, Hidden), span(0, 4, ListItem)]
+        );
     }
 
     #[test]
