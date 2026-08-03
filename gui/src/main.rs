@@ -3294,6 +3294,25 @@ mod tests {
     }
 
     #[test]
+    fn content_sig_is_stable_and_detects_changes() {
+        // Guards the reload-diff: `maybe_reload` overwrites the buffer only when
+        // the signature changes, so it must be stable when nothing changed and
+        // differ on title/folder edits. Pure (no GTK), runs headless.
+        use note_core::{NoteStore, ROOT_FOLDER};
+        let mut d = NoteStore::new();
+        let id = d.create_note(1).unwrap();
+        d.set_title(&id, "One", 1).unwrap();
+        let sig = super::content_sig(&d);
+        assert_eq!(sig, super::content_sig(&d), "stable when unchanged");
+        d.set_title(&id, "Two", 2).unwrap();
+        assert_ne!(sig, super::content_sig(&d), "title edit detected");
+        let sig2 = super::content_sig(&d);
+        let f = d.create_folder("F", ROOT_FOLDER, 3).unwrap();
+        d.move_note(&id, f.as_str(), 3).unwrap();
+        assert_ne!(sig2, super::content_sig(&d), "folder move detected");
+    }
+
+    #[test]
     fn buffer_source_keeps_hidden_markers() {
         use gtk::prelude::*;
         // Regression for #154: a WYSIWYG-hidden marker (invisible tag) must still
