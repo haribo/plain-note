@@ -840,6 +840,51 @@ fn spans(text: &str) -> Vec<Span> {
     out
 }
 
+/// URL of the link whose *label* contains char `offset`, if any. Mirrors what is
+/// rendered as a link: code fences are skipped, and only the visible label (not
+/// the hidden `](url)`) is clickable. Used to follow links on Ctrl+click.
+fn link_at(text: &str, offset: usize) -> Option<String> {
+    let mut base = 0usize;
+    let mut in_code = false;
+    for line in text.split('\n') {
+        let ll = line.chars().count();
+        if line.starts_with("```") {
+            in_code = !in_code;
+        } else if !in_code && offset >= base && offset <= base + ll {
+            return link_in_line(line, offset - base);
+        }
+        base += ll + 1;
+    }
+    None
+}
+
+/// URL of the `[label](url)` whose label contains the line-local char `off`.
+fn link_in_line(line: &str, off: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if chars[i] == '['
+            && let Some(rb) = find_close(&chars, i + 1, n, &[']'])
+            && rb > i + 1
+            && rb + 1 < n
+            && chars[rb + 1] == '('
+            && let Some(rp) = find_close(&chars, rb + 2, n, &[')'])
+        {
+            if off > i && off < rb {
+                let url: String = chars[rb + 2..rp].iter().collect();
+                if !url.is_empty() {
+                    return Some(url);
+                }
+            }
+            i = rp + 1;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
 // --- expanded-folders persistence (device-local UI state) ---
 
 /// Path of the device-local file storing the expanded folder ids: `PN_GUI_STATE`
@@ -1956,6 +2001,37 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         buffer.connect_changed(move |_| restyle());
     }
 
+    // Follow links on Ctrl+click (plain clicks stay cursor placement, since the
+    // view is editable). The link URL lives in the Markdown source at the offset.
+    {
+        let tv = text_view.clone();
+        let buffer = buffer.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+        gesture.connect_released(move |g, _n, x, y| {
+            if !g
+                .current_event_state()
+                .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            {
+                return;
+            }
+            let (bx, by) =
+                tv.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            if let Some(iter) = tv.iter_at_location(bx, by) {
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string();
+                if let Some(url) = link_at(&text, iter.offset() as usize) {
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                        &url,
+                        None::<&gtk::gio::AppLaunchContext>,
+                    );
+                }
+            }
+        });
+        text_view.add_controller(gesture);
+    }
+
     // Title edits -> save + update tab, sidebar row and (if active) the header.
     {
         let ui = ui.clone();
@@ -2451,7 +2527,7 @@ fn install_css() {
 mod tests {
     use super::{
         Span, SpanKind, code_block, count_text, heading_level_of, heading_prefix, inline_spans,
-        insert_link, parse_expanded, serialize_expanded, set_heading_line, spans,
+        insert_link, link_at, parse_expanded, serialize_expanded, set_heading_line, spans,
         subtree_note_count, toggle_line_prefix, toggle_wrap, transform_block,
     };
     use std::collections::HashSet;
@@ -2589,6 +2665,28 @@ mod tests {
                 span(26, 29, Hidden),
             ],
         );
+    }
+
+    #[test]
+    fn link_at_returns_url_when_offset_is_in_the_label() {
+        // "voir [la doc](https://x) fin": label chars are 6..12.
+        let t = "voir [la doc](https://x) fin";
+        assert_eq!(link_at(t, 6), Some("https://x".to_string()));
+        assert_eq!(link_at(t, 11), Some("https://x".to_string()));
+        // Outside the label (the `[`, the hidden url, plain text) → nothing.
+        assert_eq!(link_at(t, 5), None); // on the `[`
+        assert_eq!(link_at(t, 0), None); // in "voir"
+        assert_eq!(link_at(t, 26), None); // in " fin"
+    }
+
+    #[test]
+    fn link_at_uses_the_right_line_and_skips_code_blocks() {
+        // Second line holds the link; offset is absolute across lines.
+        let t = "intro\nvoir [doc](u) ici";
+        assert_eq!(link_at(t, 12), Some("u".to_string())); // "doc" label
+        // A link inside a fenced block is verbatim, not clickable.
+        let c = "```\n[doc](u)\n```";
+        assert_eq!(link_at(c, 6), None);
     }
 
     #[test]
