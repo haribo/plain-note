@@ -252,6 +252,22 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_device_id_fails() {
+        // The AAD binds the origin device, so the relay cannot replay one
+        // device's envelope into another device's slot.
+        let key = GroupKey::generate();
+        let env = seal(&key, aad(), b"secret");
+        let other_device = Aad {
+            device_id: [0xAB; ID_LEN],
+            ..aad()
+        };
+        assert_eq!(
+            open(&key, other_device, &env).unwrap_err(),
+            CryptoError::AuthenticationFailed
+        );
+    }
+
+    #[test]
     fn truncated_envelope_is_rejected() {
         let key = GroupKey::generate();
         assert_eq!(
