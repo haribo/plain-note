@@ -1748,10 +1748,18 @@ fn sel_bounds(b: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
     }
 }
 
+/// Full Markdown source of `b`, including the WYSIWYG-hidden marker chars.
+/// Reading with `include_hidden_chars = false` drops runs covered by the
+/// `invisible` tags (markers like `**`, `#`, `- `), which would corrupt the note
+/// on save or rewrite it without its formatting on a toolbar action (#154).
+fn buffer_source(b: &gtk::TextBuffer) -> String {
+    b.text(&b.start_iter(), &b.end_iter(), true).to_string()
+}
+
 /// Wrap/unwrap the selection with an inline `marker` (e.g. `**`, `*`, `` ` ``).
 fn apply_wrap(b: &gtk::TextBuffer, marker: &str) {
     let (s, e) = sel_bounds(b);
-    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let full = buffer_source(b);
     let (new_text, ns, ne) = toggle_wrap(&full, s.offset() as usize, e.offset() as usize, marker);
     replace_and_select(b, &new_text, ns, ne);
 }
@@ -1768,7 +1776,7 @@ fn replace_and_select(b: &gtk::TextBuffer, new_text: &str, ns: usize, ne: usize)
 /// Apply a per-line transform to every line the selection spans.
 fn transform_lines(b: &gtk::TextBuffer, f: impl Fn(&str) -> String) {
     let (s, e) = sel_bounds(b);
-    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let full = buffer_source(b);
     let (new_text, ns, ne) = transform_block(&full, s.offset() as usize, e.offset() as usize, f);
     replace_and_select(b, &new_text, ns, ne);
 }
@@ -1776,7 +1784,7 @@ fn transform_lines(b: &gtk::TextBuffer, f: impl Fn(&str) -> String) {
 /// Insert a fenced code block around the selection.
 fn apply_code_block(b: &gtk::TextBuffer) {
     let (s, e) = sel_bounds(b);
-    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let full = buffer_source(b);
     let (new_text, ns, ne) = code_block(&full, s.offset() as usize, e.offset() as usize);
     replace_and_select(b, &new_text, ns, ne);
 }
@@ -1784,7 +1792,7 @@ fn apply_code_block(b: &gtk::TextBuffer) {
 /// Insert a Markdown link, selecting the `url` placeholder for quick typing.
 fn apply_link(b: &gtk::TextBuffer) {
     let (s, e) = sel_bounds(b);
-    let full = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+    let full = buffer_source(b);
     let (new_text, ns, ne) = insert_link(&full, s.offset() as usize, e.offset() as usize);
     replace_and_select(b, &new_text, ns, ne);
 }
@@ -2186,10 +2194,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     {
         let count_label = count_label.clone();
         buffer.connect_changed(move |buf| {
-            let text = buf
-                .text(&buf.start_iter(), &buf.end_iter(), false)
-                .to_string();
-            count_label.set_text(&count_text(&text));
+            count_label.set_text(&count_text(&buffer_source(buf)));
         });
     }
 
@@ -2216,9 +2221,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
             let (bx, by) =
                 tv.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
             if let Some(iter) = tv.iter_at_location(bx, by) {
-                let text = buffer
-                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                    .to_string();
+                let text = buffer_source(&buffer);
                 if let Some(url) = link_at(&text, iter.offset() as usize) {
                     let _ = gtk::gio::AppInfo::launch_default_for_uri(
                         &url,
@@ -2262,9 +2265,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
             if state.borrow().loading {
                 return;
             }
-            let text = buf
-                .text(&buf.start_iter(), &buf.end_iter(), false)
-                .to_string();
+            let text = buffer_source(buf);
             let mut st = state.borrow_mut();
             let _ = st.doc.replace_text(&id, &text, store::now_millis());
             st.persist();
@@ -3016,10 +3017,7 @@ fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
             continue;
         }
         let cur_title = tab.title.text().to_string();
-        let cur_body = tab
-            .buffer
-            .text(&tab.buffer.start_iter(), &tab.buffer.end_iter(), false)
-            .to_string();
+        let cur_body = buffer_source(&tab.buffer);
         if cur_title != note.title || cur_body != note.text {
             state.borrow_mut().loading = true;
             if cur_title != note.title {
@@ -3293,6 +3291,27 @@ mod tests {
             spans("2. x"),
             vec![span(0, 3, Hidden), span(0, 4, ListItem)]
         );
+    }
+
+    #[test]
+    fn buffer_source_keeps_hidden_markers() {
+        use gtk::prelude::*;
+        // Regression for #154: a WYSIWYG-hidden marker (invisible tag) must still
+        // be returned by buffer_source, else the note is saved/rewritten without
+        // it. GTK needs a display, so this is skipped in headless CI.
+        if gtk::init().is_err() {
+            return;
+        }
+        let b = gtk::TextBuffer::new(None);
+        b.set_text("**bold**");
+        let hide = gtk::TextTag::builder().invisible(true).build();
+        b.tag_table().add(&hide);
+        b.apply_tag(&hide, &b.iter_at_offset(0), &b.iter_at_offset(2));
+        // The buggy read (include_hidden_chars = false) drops the hidden `**`.
+        let stripped = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+        assert_eq!(stripped, "bold**");
+        // buffer_source keeps the full source.
+        assert_eq!(super::buffer_source(&b), "**bold**");
     }
 
     #[test]
