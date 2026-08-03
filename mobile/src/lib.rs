@@ -415,4 +415,74 @@ mod tests {
         let err = app.get_note("deadbeef".into()).unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
     }
+
+    #[test]
+    fn error_mapping_classifies_each_variant() {
+        use anyhow::anyhow;
+        assert!(matches!(
+            map(anyhow!("ambiguous prefix xyz")),
+            AppError::Ambiguous(_)
+        ));
+        assert!(matches!(
+            map(anyhow!("totally unexpected")),
+            AppError::Invalid(_)
+        ));
+        assert!(matches!(
+            map(anyhow::Error::new(std::io::Error::other("disk"))),
+            AppError::Io(_)
+        ));
+        // map_net reclassifies the Invalid catch-all as Network, keeps the rest.
+        assert!(matches!(
+            map_net(anyhow!("totally unexpected")),
+            AppError::Network(_)
+        ));
+        assert!(matches!(
+            map_net(anyhow!("ambiguous prefix xyz")),
+            AppError::Ambiguous(_)
+        ));
+    }
+
+    #[test]
+    fn tag_add_remove_and_search() {
+        let app = temp_app();
+        let id = app.create_note().unwrap();
+        app.set_title(id.clone(), "Groceries".into()).unwrap();
+        app.add_tag(id.clone(), "urgent".into()).unwrap();
+        assert!(
+            app.get_note(id.clone())
+                .unwrap()
+                .tags
+                .contains(&"urgent".to_string())
+        );
+        app.remove_tag(id.clone(), "urgent".into()).unwrap();
+        assert!(app.get_note(id.clone()).unwrap().tags.is_empty());
+        let hits = app.search("grocer".into()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+    }
+
+    #[test]
+    fn empty_trash_purges_trashed_notes() {
+        let app = temp_app();
+        let id = app.create_note().unwrap();
+        app.trash(id).unwrap();
+        assert_eq!(app.empty_trash().unwrap(), 1);
+        assert!(app.list_trashed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_rename_move_and_delete() {
+        let app = temp_app();
+        let parent = app.create_folder("Parent".into(), None).unwrap();
+        let child = app.create_folder("Child".into(), None).unwrap();
+        app.rename_folder(child.clone(), "Renamed".into()).unwrap();
+        app.move_folder(child.clone(), Some(parent.clone()))
+            .unwrap();
+        let folders = app.list_folders().unwrap();
+        let moved = folders.iter().find(|f| f.id == child).unwrap();
+        assert_eq!(moved.name, "Renamed");
+        assert_eq!(moved.parent, parent);
+        app.delete_folder(parent.clone()).unwrap();
+        assert!(app.list_folders().unwrap().iter().all(|f| f.id != parent));
+    }
 }
