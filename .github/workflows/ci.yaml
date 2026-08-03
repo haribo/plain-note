@@ -23,7 +23,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install GTK4 and libadwaita (for the gui crate)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+        # xvfb provides a virtual display so GTK-dependent tests actually run.
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev xvfb
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,7 +39,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        # xvfb-run gives GTK tests a display; PN_REQUIRE_GTK makes them fail
+        # loudly (rather than skip) if the display is somehow unavailable.
+        env:
+          PN_REQUIRE_GTK: "1"
+        run: xvfb-run -a cargo test --workspace
 
   android:
     name: android tests
