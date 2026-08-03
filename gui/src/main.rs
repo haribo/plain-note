@@ -170,6 +170,18 @@ fn build_ui(app: &adw::Application) {
     sync_label.add_css_class("dim-label");
     sync_label.add_css_class("caption");
     content_header.pack_end(&sync_label);
+
+    let sync_btn = gtk::Button::from_icon_name("emblem-synchronizing-symbolic");
+    sync_btn.add_css_class("flat");
+    sync_btn.set_tooltip_text(Some("Synchronisation"));
+    content_header.pack_end(&sync_btn);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sync_label = sync_label.clone();
+        sync_btn.connect_clicked(move |btn| open_sync_dialog(btn, &ui, &state, &sync_label));
+    }
+
     start_auto_sync(&ui, &state, &sync_label);
 
     // Row selection: folders toggle, notes open.
@@ -883,6 +895,35 @@ fn link_in_line(line: &str, off: usize) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// Render `data` as a QR code into an RGBA8 buffer: `scale` pixels per module,
+/// dark modules black on white, with a 4-module quiet zone. Returns the buffer
+/// and the square side in pixels. Errors if `data` is too large for a QR code.
+fn qr_rgba(data: &str, scale: usize) -> anyhow::Result<(Vec<u8>, usize)> {
+    const QUIET: usize = 4;
+    let code = qrcode::QrCode::new(data.as_bytes())?;
+    let w = code.width();
+    let side = (w + QUIET * 2) * scale;
+    let colors = code.to_colors();
+    let mut rgba = vec![255u8; side * side * 4]; // white background
+    for my in 0..w {
+        for mx in 0..w {
+            if colors[my * w + mx] == qrcode::Color::Dark {
+                for py in 0..scale {
+                    for px in 0..scale {
+                        let x = (QUIET + mx) * scale + px;
+                        let y = (QUIET + my) * scale + py;
+                        let idx = (y * side + x) * 4;
+                        rgba[idx] = 0;
+                        rgba[idx + 1] = 0;
+                        rgba[idx + 2] = 0;
+                    }
+                }
+            }
+        }
+    }
+    Ok((rgba, side))
 }
 
 // --- expanded-folders persistence (device-local UI state) ---
@@ -2420,6 +2461,374 @@ fn start_auto_sync(ui: &Ui, state: &Rc<RefCell<State>>, label: &gtk::Label) {
     });
 }
 
+/// Run an async `remote` call on a worker runtime, delivering the result to
+/// `on_done` back on the GTK main loop.
+fn spawn_remote<T: Send + 'static>(
+    fut: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+    on_done: impl Fn(Result<T, String>) + 'static,
+) {
+    let (tx, rx) = async_channel::bounded::<Result<T, String>>(1);
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send_blocking(Err(e.to_string()));
+                return;
+            }
+        };
+        let _ = tx.send_blocking(rt.block_on(fut));
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(r) = rx.recv().await {
+            on_done(r);
+        }
+    });
+}
+
+fn section_title(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.set_halign(gtk::Align::Start);
+    l.add_css_class("heading");
+    l.set_margin_top(6);
+    l
+}
+
+/// Sync onboarding + device management: create a group, join one, or list and
+/// revoke devices. Writes the same `config.json` the CLI would — elsewhere the
+/// GUI only reads it.
+fn open_sync_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    sync_label: &gtk::Label,
+) {
+    let window = anchor.root().and_downcast::<gtk::Window>();
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Synchronisation");
+    dialog.set_content_width(440);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    body.set_margin_top(18);
+    body.set_margin_bottom(18);
+    body.set_margin_start(18);
+    body.set_margin_end(18);
+
+    let header = adw::HeaderBar::new();
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&header);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&body)
+        .propagate_natural_height(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    tv.set_content(Some(&scroll));
+    dialog.set_child(Some(&tv));
+
+    match config::Settings::load_from(&config::config_path()).ok() {
+        Some(settings) => build_enrolled_body(&body, &settings),
+        None => build_unenrolled_body(&body, ui, state, sync_label, &dialog),
+    }
+
+    dialog.present(window.as_ref());
+}
+
+/// Not-enrolled view: join an existing group (paste blob) or create a new one.
+fn build_unenrolled_body(
+    body: &gtk::Box,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    sync_label: &gtk::Label,
+    dialog: &adw::Dialog,
+) {
+    let intro = gtk::Label::new(Some("Cet appareil n'est pas synchronisé."));
+    intro.set_halign(gtk::Align::Start);
+    intro.set_wrap(true);
+    body.append(&intro);
+
+    // --- Join an existing group ---
+    body.append(&section_title("Rejoindre un groupe"));
+    let blob_entry = gtk::Entry::new();
+    blob_entry.set_placeholder_text(Some("Coller le code d'appairage"));
+    blob_entry.set_hexpand(true);
+    body.append(&blob_entry);
+    let join_btn = gtk::Button::with_label("Rejoindre");
+    join_btn.add_css_class("suggested-action");
+    join_btn.set_halign(gtk::Align::End);
+    body.append(&join_btn);
+    let join_status = gtk::Label::new(None);
+    join_status.set_halign(gtk::Align::Start);
+    join_status.add_css_class("dim-label");
+    body.append(&join_status);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sync_label = sync_label.clone();
+        let dialog = dialog.clone();
+        let blob_entry = blob_entry.clone();
+        let join_status = join_status.clone();
+        join_btn.connect_clicked(move |btn| {
+            let blob = blob_entry.text().trim().to_string();
+            if blob.is_empty() {
+                join_status.set_text("Code d'appairage requis.");
+                return;
+            }
+            btn.set_sensitive(false);
+            join_status.set_text("Appairage…");
+            let cfg = config::config_path();
+            let ui = ui.clone();
+            let state = state.clone();
+            let sync_label = sync_label.clone();
+            let dialog = dialog.clone();
+            let btn = btn.clone();
+            let join_status = join_status.clone();
+            spawn_remote(
+                async move { remote::pair(&cfg, &blob).await.map_err(|e| e.to_string()) },
+                move |res| match res {
+                    Ok(()) => {
+                        start_auto_sync(&ui, &state, &sync_label);
+                        dialog.close();
+                    }
+                    Err(e) => {
+                        btn.set_sensitive(true);
+                        join_status.set_text(&format!("Échec : {e}"));
+                    }
+                },
+            );
+        });
+    }
+
+    // --- Create a new group (this device becomes admin) ---
+    body.append(&section_title("Créer un groupe"));
+    let relay_entry = gtk::Entry::new();
+    relay_entry.set_placeholder_text(Some("URL du relais (ex. https://relay.example.org)"));
+    body.append(&relay_entry);
+    let admin_entry = gtk::Entry::new();
+    admin_entry.set_visibility(false);
+    admin_entry.set_placeholder_text(Some("Jeton admin"));
+    body.append(&admin_entry);
+    let create_btn = gtk::Button::with_label("Créer le groupe");
+    create_btn.add_css_class("suggested-action");
+    create_btn.set_halign(gtk::Align::End);
+    body.append(&create_btn);
+    let create_status = gtk::Label::new(None);
+    create_status.set_halign(gtk::Align::Start);
+    create_status.add_css_class("dim-label");
+    body.append(&create_status);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sync_label = sync_label.clone();
+        let body = body.clone();
+        let relay_entry = relay_entry.clone();
+        let admin_entry = admin_entry.clone();
+        let create_status = create_status.clone();
+        create_btn.connect_clicked(move |btn| {
+            let relay = relay_entry.text().trim().to_string();
+            let admin = admin_entry.text().trim().to_string();
+            if relay.is_empty() || admin.is_empty() {
+                create_status.set_text("URL du relais et jeton admin requis.");
+                return;
+            }
+            btn.set_sensitive(false);
+            create_status.set_text("Création…");
+            let cfg = config::config_path();
+            let ui = ui.clone();
+            let state = state.clone();
+            let sync_label = sync_label.clone();
+            let body = body.clone();
+            let btn = btn.clone();
+            let create_status = create_status.clone();
+            spawn_remote(
+                async move {
+                    remote::init(&cfg, &relay, &admin)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |res| match res {
+                    Ok(blob) => {
+                        start_auto_sync(&ui, &state, &sync_label);
+                        show_pairing_blob(&body, &blob);
+                    }
+                    Err(e) => {
+                        btn.set_sensitive(true);
+                        create_status.set_text(&format!("Échec : {e}"));
+                    }
+                },
+            );
+        });
+    }
+}
+
+/// Replace the dialog body with the freshly-minted pairing blob: a QR to scan
+/// from another device, plus the raw text to copy.
+fn show_pairing_blob(body: &gtk::Box, blob: &str) {
+    while let Some(child) = body.first_child() {
+        body.remove(&child);
+    }
+    let intro = gtk::Label::new(Some(
+        "Groupe créé. Scannez ce code depuis l'autre appareil, ou copiez le texte.",
+    ));
+    intro.set_halign(gtk::Align::Start);
+    intro.set_wrap(true);
+    body.append(&intro);
+
+    if let Ok((rgba, side)) = qr_rgba(blob, 6) {
+        let bytes = glib::Bytes::from_owned(rgba);
+        let texture = gtk::gdk::MemoryTexture::new(
+            side as i32,
+            side as i32,
+            gtk::gdk::MemoryFormat::R8g8b8a8,
+            &bytes,
+            side * 4,
+        );
+        let pic = gtk::Picture::for_paintable(&texture);
+        pic.set_size_request(side as i32, side as i32);
+        pic.set_halign(gtk::Align::Center);
+        pic.set_margin_top(6);
+        pic.set_margin_bottom(6);
+        body.append(&pic);
+    }
+
+    let entry = gtk::Entry::new();
+    entry.set_text(blob);
+    entry.set_editable(false);
+    entry.set_hexpand(true);
+    body.append(&entry);
+    let copy = gtk::Button::with_label("Copier le code");
+    copy.set_halign(gtk::Align::End);
+    {
+        let blob = blob.to_string();
+        copy.connect_clicked(move |btn| {
+            btn.clipboard().set_text(&blob);
+            btn.set_label("Copié");
+        });
+    }
+    body.append(&copy);
+}
+
+/// Enrolled view: sync status plus admin device management (list + revoke).
+fn build_enrolled_body(body: &gtk::Box, settings: &config::Settings) {
+    let status = gtk::Label::new(Some("Cet appareil est synchronisé."));
+    status.set_halign(gtk::Align::Start);
+    body.append(&status);
+    for line in [
+        format!("Relais : {}", settings.relay_url),
+        format!("Groupe : {}", settings.group_id),
+    ] {
+        let l = gtk::Label::new(Some(&line));
+        l.set_halign(gtk::Align::Start);
+        l.set_wrap(true);
+        l.set_selectable(true);
+        l.add_css_class("dim-label");
+        body.append(&l);
+    }
+
+    body.append(&section_title("Gérer les appareils"));
+    let admin_entry = gtk::Entry::new();
+    admin_entry.set_visibility(false);
+    admin_entry.set_placeholder_text(Some("Jeton admin"));
+    body.append(&admin_entry);
+    let list_btn = gtk::Button::with_label("Lister les appareils");
+    list_btn.set_halign(gtk::Align::End);
+    body.append(&list_btn);
+    let dev_list = gtk::ListBox::new();
+    dev_list.set_selection_mode(gtk::SelectionMode::None);
+    dev_list.add_css_class("boxed-list");
+    dev_list.set_margin_top(6);
+    body.append(&dev_list);
+    let dev_status = gtk::Label::new(None);
+    dev_status.set_halign(gtk::Align::Start);
+    dev_status.add_css_class("dim-label");
+    body.append(&dev_status);
+
+    // `refresh` re-fetches the device list; revoke buttons call it again, so it
+    // is held indirectly (an Rc cell) to allow the self-reference.
+    type Refresh = Rc<dyn Fn()>;
+    let holder: Rc<RefCell<Option<Refresh>>> = Rc::new(RefCell::new(None));
+    let refresh: Refresh = Rc::new({
+        let admin_entry = admin_entry.clone();
+        let dev_list = dev_list.clone();
+        let dev_status = dev_status.clone();
+        let holder = holder.clone();
+        move || {
+            let admin = admin_entry.text().trim().to_string();
+            if admin.is_empty() {
+                dev_status.set_text("Jeton admin requis.");
+                return;
+            }
+            while let Some(child) = dev_list.first_child() {
+                dev_list.remove(&child);
+            }
+            dev_status.set_text("Chargement…");
+            let cfg = config::config_path();
+            let dev_list = dev_list.clone();
+            let dev_status = dev_status.clone();
+            let holder = holder.clone();
+            let admin_for_rows = admin.clone();
+            spawn_remote(
+                async move {
+                    remote::devices(&cfg, &admin)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |res| match res {
+                    Ok(devices) => {
+                        dev_status.set_text("");
+                        for (id, active) in &devices {
+                            let row = adw::ActionRow::new();
+                            row.set_title(id);
+                            row.set_subtitle(if *active { "actif" } else { "révoqué" });
+                            if *active {
+                                let rb = gtk::Button::with_label("Révoquer");
+                                rb.add_css_class("destructive-action");
+                                rb.set_valign(gtk::Align::Center);
+                                let id = id.clone();
+                                let admin = admin_for_rows.clone();
+                                let holder = holder.clone();
+                                let dev_status = dev_status.clone();
+                                rb.connect_clicked(move |b| {
+                                    b.set_sensitive(false);
+                                    let cfg = config::config_path();
+                                    let id = id.clone();
+                                    let admin = admin.clone();
+                                    let holder = holder.clone();
+                                    let dev_status = dev_status.clone();
+                                    spawn_remote(
+                                        async move {
+                                            remote::revoke(&cfg, &admin, &id)
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        },
+                                        move |r| match r {
+                                            Ok(()) => {
+                                                if let Some(f) = holder.borrow().as_ref() {
+                                                    f();
+                                                }
+                                            }
+                                            Err(e) => dev_status.set_text(&format!("Échec : {e}")),
+                                        },
+                                    );
+                                });
+                                row.add_suffix(&rb);
+                            }
+                            dev_list.append(&row);
+                        }
+                        if devices.is_empty() {
+                            dev_status.set_text("Aucun appareil.");
+                        }
+                    }
+                    Err(e) => dev_status.set_text(&format!("Échec : {e}")),
+                },
+            );
+        }
+    });
+    *holder.borrow_mut() = Some(refresh.clone());
+    list_btn.connect_clicked(move |_| refresh());
+}
+
 fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
     let Ok(doc) = state.borrow().store.load() else {
         return;
@@ -2687,6 +3096,20 @@ mod tests {
         // A link inside a fenced block is verbatim, not clickable.
         let c = "```\n[doc](u)\n```";
         assert_eq!(link_at(c, 6), None);
+    }
+
+    #[test]
+    fn qr_rgba_has_the_right_shape_and_draws_modules() {
+        let (buf, side) = super::qr_rgba("plainnote-pairing-blob", 3).unwrap();
+        // Square RGBA buffer, side a multiple of the scale, at least a v1 QR
+        // (21 modules) plus the 4-module quiet zone on each edge.
+        assert_eq!(buf.len(), side * side * 4);
+        assert_eq!(side % 3, 0);
+        assert!(side >= (21 + 8) * 3);
+        // The quiet zone keeps the top-left corner white; at least one dark
+        // module is drawn somewhere (a finder pattern).
+        assert_eq!(&buf[0..4], &[255, 255, 255, 255]);
+        assert!(buf.chunks(4).any(|p| p == [0, 0, 0, 255]));
     }
 
     #[test]
