@@ -207,3 +207,101 @@ async fn recv(ws: &mut Ws) -> Result<ServerMsg, SyncError> {
     }
     Err(SyncError::Connection("connection closed".into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::NoteStore;
+
+    const ORIGIN: [u8; 16] = [0x22; 16];
+
+    fn config_with(e2e: GroupKey) -> SyncConfig {
+        SyncConfig {
+            relay_url: "ws://relay.invalid/v1/sync".into(),
+            group_id: "00".repeat(16),
+            device_id: "11".repeat(16),
+            signing_key: SigningKey::from_bytes(&[7u8; 32]),
+            e2e_key: e2e,
+        }
+    }
+
+    /// Raw Automerge changes of a store holding one note.
+    fn seeded_changes() -> Vec<Vec<u8>> {
+        let mut s = NoteStore::new();
+        s.create_note(1).unwrap();
+        s.raw_changes().into_iter().map(|(_, b)| b).collect()
+    }
+
+    fn seal_change(cfg: &SyncConfig, group: &[u8; 16], bytes: &[u8]) -> String {
+        let aad = Aad {
+            group_id: *group,
+            device_id: ORIGIN,
+            kind: Kind::Change,
+        };
+        B64.encode(crypto::seal(&cfg.e2e_key, aad, bytes))
+    }
+
+    #[test]
+    fn apply_change_accepts_and_merges_a_valid_envelope() {
+        let cfg = config_with(GroupKey::generate());
+        let group = id_bytes(&cfg.group_id).unwrap();
+        let origin_hex = hex::encode(ORIGIN);
+        let mut dst = NoteStore::new();
+        for bytes in seeded_changes() {
+            let env = seal_change(&cfg, &group, &bytes);
+            apply_change(&cfg, &mut dst, &group, &origin_hex, &env).unwrap();
+        }
+        assert_eq!(dst.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_change_rejects_a_tampered_envelope() {
+        let cfg = config_with(GroupKey::generate());
+        let group = id_bytes(&cfg.group_id).unwrap();
+        let bytes = seeded_changes().pop().unwrap();
+        let aad = Aad {
+            group_id: group,
+            device_id: ORIGIN,
+            kind: Kind::Change,
+        };
+        let mut env = crypto::seal(&cfg.e2e_key, aad, &bytes);
+        let last = env.len() - 1;
+        env[last] ^= 0xff; // flip the AEAD tag
+        let env_b64 = B64.encode(&env);
+        let mut dst = NoteStore::new();
+        let err = apply_change(&cfg, &mut dst, &group, &hex::encode(ORIGIN), &env_b64).unwrap_err();
+        assert!(matches!(err, SyncError::Crypto(_)));
+    }
+
+    #[test]
+    fn apply_change_rejects_a_wrong_key() {
+        let cfg = config_with(GroupKey::generate());
+        let group = id_bytes(&cfg.group_id).unwrap();
+        let bytes = seeded_changes().pop().unwrap();
+        let env = seal_change(&cfg, &group, &bytes);
+        // Decrypt with a different group key.
+        let other = config_with(GroupKey::generate());
+        let mut dst = NoteStore::new();
+        let err = apply_change(&other, &mut dst, &group, &hex::encode(ORIGIN), &env).unwrap_err();
+        assert!(matches!(err, SyncError::Crypto(_)));
+    }
+
+    #[test]
+    fn apply_change_rejects_non_base64_and_bad_origin() {
+        let cfg = config_with(GroupKey::generate());
+        let group = id_bytes(&cfg.group_id).unwrap();
+        let mut dst = NoteStore::new();
+        let not_b64 = apply_change(
+            &cfg,
+            &mut dst,
+            &group,
+            &hex::encode(ORIGIN),
+            "!!!not base64!!!",
+        )
+        .unwrap_err();
+        assert!(matches!(not_b64, SyncError::Protocol(_)));
+        let env = seal_change(&cfg, &group, &seeded_changes().pop().unwrap());
+        let bad_id = apply_change(&cfg, &mut dst, &group, "zzzz", &env).unwrap_err();
+        assert!(matches!(bad_id, SyncError::BadId));
+    }
+}

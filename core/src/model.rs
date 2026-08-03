@@ -963,4 +963,46 @@ mod tests {
 
         assert_eq!(a.get_note(&id).unwrap(), b2.get_note(&id).unwrap());
     }
+
+    #[test]
+    fn concurrent_text_edits_merge() {
+        // The headline CRDT claim: concurrent char-level body edits both survive.
+        let mut a = NoteStore::new();
+        let id = a.create_note(1).unwrap();
+        a.replace_text(&id, "hello world", 1).unwrap();
+        let mut b = NoteStore::load(&a.save()).unwrap();
+        a.splice_text(&id, 11, 0, "!", 2).unwrap(); // append at the end
+        b.splice_text(&id, 0, 0, ">> ", 2).unwrap(); // prepend at the start
+        a.merge(&mut b).unwrap();
+        let text = a.get_note(&id).unwrap().unwrap().text;
+        assert!(text.starts_with(">> "), "b's edit survived: {text:?}");
+        assert!(text.ends_with('!'), "a's edit survived: {text:?}");
+        assert!(text.contains("hello world"));
+    }
+
+    #[test]
+    fn delete_note_wins_over_concurrent_edit() {
+        // A hard delete on one device removes the note despite a concurrent edit
+        // on another — the delete is not silently undone by the edit.
+        let mut a = NoteStore::new();
+        let id = a.create_note(1).unwrap();
+        a.replace_text(&id, "keep", 1).unwrap();
+        let mut b = NoteStore::load(&a.save()).unwrap();
+        a.delete_note(&id).unwrap();
+        b.set_title(&id, "edited", 2).unwrap();
+        a.merge(&mut b).unwrap();
+        assert!(a.get_note(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_rejects_corrupt_bytes() {
+        assert!(NoteStore::load(&[0xde, 0xad, 0xbe, 0xef]).is_err());
+    }
+
+    #[test]
+    fn apply_change_bytes_rejects_malformed() {
+        let mut s = NoteStore::new();
+        let err = s.apply_change_bytes(vec![1, 2, 3, 4]).unwrap_err();
+        assert!(matches!(err, ModelError::InvalidChange));
+    }
 }
