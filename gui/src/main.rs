@@ -3298,8 +3298,13 @@ mod tests {
         use gtk::prelude::*;
         // Regression for #154: a WYSIWYG-hidden marker (invisible tag) must still
         // be returned by buffer_source, else the note is saved/rewritten without
-        // it. GTK needs a display, so this is skipped in headless CI.
+        // it. GTK needs a display; CI provides one via xvfb and sets
+        // PN_REQUIRE_GTK so a missing display fails loudly instead of skipping.
         if gtk::init().is_err() {
+            assert!(
+                std::env::var_os("PN_REQUIRE_GTK").is_none(),
+                "PN_REQUIRE_GTK is set but gtk::init() failed (no display?)"
+            );
             return;
         }
         let b = gtk::TextBuffer::new(None);
