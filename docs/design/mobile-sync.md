@@ -37,11 +37,12 @@ Scanning/encoding is pure UI: CameraX + ML Kit Barcode to decode → `pair(blob)
 `init_remote` returns a blob the app renders as a QR. The facade only exchanges
 the **string**.
 
-## Sync strategy (this increment)
+## Sync strategy
 
-**One-shot** `sync()` called on app open/resume and after edits.
-**Continuous / background sync** (Android foreground service vs WorkManager) is
-deliberately deferred — it needs its own lifecycle design.
+**One-shot** `sync()` runs on app open/resume and after edits. **Background
+sync** is implemented with **WorkManager**: a unique periodic job (`SyncWorker`,
+~15 min, network-constrained). A foreground service was considered and rejected
+as too heavy for periodic sync.
 
 ## Security
 
@@ -51,5 +52,5 @@ the E2E key. No note plaintext or key material crosses the FFI boundary.
 
 ## Out of scope
 
-Continuous/background sync (WorkManager), attachments (increment 3), and a
-mobile equivalent of the CLI `sync --watch`.
+Mobile attachments (the facade has no `attach`/`fetch`) and a mobile equivalent
+of the CLI `sync --watch` (live WebSocket subscription).
