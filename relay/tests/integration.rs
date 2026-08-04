@@ -682,3 +682,25 @@ async fn sync_survives_relay_restart_with_sqlite() {
         let _ = std::fs::remove_file(format!("{p}{suffix}"));
     }
 }
+
+#[tokio::test]
+async fn revoking_a_device_ends_its_live_session() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let (_group, code) = storage.create_group();
+    let sk = signing_key();
+    let (dev, _) = storage
+        .enroll(&code, sk.verifying_key().to_bytes().to_vec())
+        .unwrap();
+    let addr = spawn_server(storage.clone(), None).await;
+    let url = format!("ws://{addr}/v1/sync");
+
+    let mut ws = connect_auth(&url, &dev, &sk).await;
+    // Revoke the device while its session is still open.
+    assert!(storage.revoke_device(&dev));
+    // The next operation on the live socket must be rejected.
+    send(&mut ws, ClientMsg::Pull { since_seq: 0 }).await;
+    match recv(&mut ws).await {
+        ServerMsg::Error { code, .. } => assert_eq!(code, "unauthorized"),
+        other => panic!("expected unauthorized after revoke, got {other:?}"),
+    }
+}
