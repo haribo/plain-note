@@ -965,6 +965,19 @@ mod tests {
     }
 
     #[test]
+    fn add_and_remove_attachment() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(1).unwrap();
+        s.add_attachment(&id, "att1", "photo.png", 1).unwrap();
+        assert_eq!(
+            s.get_note(&id).unwrap().unwrap().attachments,
+            vec![("att1".to_string(), "photo.png".to_string())]
+        );
+        s.remove_attachment(&id, "att1", 2).unwrap();
+        assert!(s.get_note(&id).unwrap().unwrap().attachments.is_empty());
+    }
+
+    #[test]
     fn concurrent_text_edits_merge() {
         // The headline CRDT claim: concurrent char-level body edits both survive.
         let mut a = NoteStore::new();
