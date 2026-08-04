@@ -111,6 +111,8 @@ dependencies {
     // lib: the UniFFI bindings load libplain_note_mobile.so lazily on the first
     // FFI call, and these tests only construct data classes + call transforms).
     testImplementation("junit:junit:4.13.2")
+    // Deterministic coroutine testing for the ViewModel (virtual time + Main).
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     // Screenshot tests (L3): Roborazzi renders composables via Robolectric on the
     // JVM — deterministic golden PNGs, no device.

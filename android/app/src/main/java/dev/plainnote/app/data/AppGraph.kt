@@ -14,6 +14,6 @@ object AppGraph {
 
     fun repository(context: Context): NoteRepository =
         repo ?: synchronized(this) {
-            repo ?: NoteRepository(context.applicationContext).also { repo = it }
+            repo ?: NativeNoteRepository(context.applicationContext).also { repo = it }
         }
 }
