@@ -3312,13 +3312,16 @@ mod tests {
         assert_ne!(sig2, super::content_sig(&d), "folder move detected");
     }
 
+    /// All GTK-widget tests live in ONE `#[test]`: GTK is single-threaded per
+    /// process, and `cargo test` spreads separate tests across worker threads, so
+    /// a second `gtk::init()` on another thread fails. Running everything on one
+    /// thread after a single init is the only harness that survives the parallel
+    /// runner (and CI). Needs a display — xvfb in CI, with PN_REQUIRE_GTK set so a
+    /// missing display fails loudly instead of skipping.
     #[test]
-    fn buffer_source_keeps_hidden_markers() {
+    fn gtk_editor_glue() {
         use gtk::prelude::*;
-        // Regression for #154: a WYSIWYG-hidden marker (invisible tag) must still
-        // be returned by buffer_source, else the note is saved/rewritten without
-        // it. GTK needs a display; CI provides one via xvfb and sets
-        // PN_REQUIRE_GTK so a missing display fails loudly instead of skipping.
+        use note_core::NoteStore;
         if gtk::init().is_err() {
             assert!(
                 std::env::var_os("PN_REQUIRE_GTK").is_none(),
@@ -3326,16 +3329,60 @@ mod tests {
             );
             return;
         }
+
+        // --- #154 unit: a hidden marker is dropped by the raw read but kept by
+        // buffer_source ---
         let b = gtk::TextBuffer::new(None);
         b.set_text("**bold**");
         let hide = gtk::TextTag::builder().invisible(true).build();
         b.tag_table().add(&hide);
         b.apply_tag(&hide, &b.iter_at_offset(0), &b.iter_at_offset(2));
-        // The buggy read (include_hidden_chars = false) drops the hidden `**`.
         let stripped = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
         assert_eq!(stripped, "bold**");
-        // buffer_source keeps the full source.
         assert_eq!(super::buffer_source(&b), "**bold**");
+
+        // --- integration: hide every marker like `restyle`, then confirm the
+        // save path preserves the full source across every construct ---
+        let source = "# Titre\nUn **gras**, de l'*ital*, du `code`, du ~~barré~~.\n\
+             Voir [lien](https://exemple.org).\n> une citation\n- puce une\n\
+             - puce deux\n1. étape une\n```rust\nlet x = 1;\n```";
+        let buffer = gtk::TextBuffer::new(None);
+        buffer.set_text(source);
+        let hide2 = gtk::TextTag::builder().invisible(true).build();
+        buffer.tag_table().add(&hide2);
+        for s in super::spans(source) {
+            if s.kind == super::SpanKind::Hidden {
+                buffer.apply_tag(
+                    &hide2,
+                    &buffer.iter_at_offset(s.start as i32),
+                    &buffer.iter_at_offset(s.end as i32),
+                );
+            }
+        }
+        let visible = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string();
+        assert!(
+            !visible.contains("**") && !visible.contains("```") && !visible.contains("~~"),
+            "markers are hidden from the visible text: {visible:?}"
+        );
+        assert_eq!(super::buffer_source(&buffer), source);
+        let mut store = NoteStore::new();
+        let id = store.create_note(1).unwrap();
+        store
+            .replace_text(&id, &super::buffer_source(&buffer), 1)
+            .unwrap();
+        assert_eq!(store.get_note(&id).unwrap().unwrap().text, source);
+
+        // --- integration: the toolbar bold/unbold cycle through a real selection
+        // (sel_bounds + toggle_wrap + replace_and_select) ---
+        let t = gtk::TextBuffer::new(None);
+        t.set_text("un mot ici");
+        t.select_range(&t.iter_at_offset(3), &t.iter_at_offset(6)); // "mot"
+        super::apply_wrap(&t, "**");
+        assert_eq!(super::buffer_source(&t), "un **mot** ici");
+        super::apply_wrap(&t, "**"); // content stays selected -> toggles off
+        assert_eq!(super::buffer_source(&t), "un mot ici");
     }
 
     #[test]
