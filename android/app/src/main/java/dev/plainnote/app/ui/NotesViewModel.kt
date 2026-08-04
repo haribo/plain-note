@@ -4,9 +4,11 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.plainnote.app.data.AppGraph
+import dev.plainnote.app.data.NoteRepository
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -26,9 +28,14 @@ private const val AUTO_SYNC_DEBOUNCE_MS = 3_000L
  * being edited, and a transient status line. Every facade call runs on the IO
  * dispatcher, never the main thread.
  */
-class NotesViewModel(app: Application) : AndroidViewModel(app) {
+class NotesViewModel(
+    app: Application,
+    private val repo: NoteRepository,
+    private val io: CoroutineDispatcher,
+) : AndroidViewModel(app) {
 
-    private val repo = AppGraph.repository(app)
+    /** Production entry point used by `by viewModels()`. */
+    constructor(app: Application) : this(app, AppGraph.repository(app), Dispatchers.IO)
 
     private val _notes = MutableStateFlow<List<NoteSummary>>(emptyList())
     val notes = _notes.asStateFlow()
@@ -70,7 +77,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         _notes.value = if (q.isNotEmpty()) repo.search(q) else repo.listNotes(_currentFolder.value?.id)
     }
 
-    fun refresh() = viewModelScope.launch(Dispatchers.IO) {
+    fun refresh() = viewModelScope.launch(io) {
         try {
             _folders.value = repo.listFolders()
             reloadNotes()
@@ -79,7 +86,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setPinned(id: String, pinned: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+    fun setPinned(id: String, pinned: Boolean) = viewModelScope.launch(io) {
         try {
             repo.setPinned(id, pinned)
             reloadNotes()
@@ -88,7 +95,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun moveNote(id: String, folder: String?) = viewModelScope.launch(Dispatchers.IO) {
+    fun moveNote(id: String, folder: String?) = viewModelScope.launch(io) {
         try {
             repo.moveNote(id, folder)
             reloadNotes()
@@ -97,7 +104,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun addTag(id: String, tag: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun addTag(id: String, tag: String) = viewModelScope.launch(io) {
         try {
             repo.addTag(id, tag.trim())
             reloadNotes()
@@ -106,7 +113,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun removeTag(id: String, tag: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun removeTag(id: String, tag: String) = viewModelScope.launch(io) {
         try {
             repo.removeTag(id, tag)
             reloadNotes()
@@ -115,7 +122,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun trashNote(id: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun trashNote(id: String) = viewModelScope.launch(io) {
         try {
             repo.trash(id)
             reloadNotes()
@@ -134,7 +141,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createFolder(name: String, parent: String? = null) = viewModelScope.launch(Dispatchers.IO) {
+    fun createFolder(name: String, parent: String? = null) = viewModelScope.launch(io) {
         try {
             repo.createFolder(name.trim(), parent)
             _folders.value = repo.listFolders()
@@ -143,7 +150,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun renameFolder(id: String, name: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun renameFolder(id: String, name: String) = viewModelScope.launch(io) {
         try {
             repo.renameFolder(id, name.trim())
             _folders.value = repo.listFolders()
@@ -152,7 +159,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun moveFolder(id: String, parent: String?) = viewModelScope.launch(Dispatchers.IO) {
+    fun moveFolder(id: String, parent: String?) = viewModelScope.launch(io) {
         try {
             repo.moveFolder(id, parent)
             _folders.value = repo.listFolders()
@@ -161,7 +168,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun deleteFolder(id: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun deleteFolder(id: String) = viewModelScope.launch(io) {
         try {
             repo.deleteFolder(id)
             // The core reparents children; drop the filter if it pointed here.
@@ -173,7 +180,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun selectFolder(folder: FolderInfo?) = viewModelScope.launch(Dispatchers.IO) {
+    fun selectFolder(folder: FolderInfo?) = viewModelScope.launch(io) {
         _query.value = ""
         _currentFolder.value = folder
         try {
@@ -183,7 +190,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setQuery(q: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun setQuery(q: String) = viewModelScope.launch(io) {
         _query.value = q
         try {
             reloadNotes()
@@ -196,7 +203,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
     fun folderName(id: String): String? =
         if (id.isEmpty()) null else _folders.value.firstOrNull { it.id == id }?.name
 
-    fun createAndOpen() = viewModelScope.launch(Dispatchers.IO) {
+    fun createAndOpen() = viewModelScope.launch(io) {
         try {
             val id = repo.createNote()
             // A new note lands in the current folder for a natural flow.
@@ -208,7 +215,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun open(id: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun open(id: String) = viewModelScope.launch(io) {
         try {
             _editing.value = repo.getNote(id)
         } catch (e: Exception) {
@@ -221,7 +228,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
-    fun saveTitle(id: String, title: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun saveTitle(id: String, title: String) = viewModelScope.launch(io) {
         try {
             repo.setTitle(id, title)
             scheduleAutoSync()
@@ -230,7 +237,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun saveBody(id: String, text: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun saveBody(id: String, text: String) = viewModelScope.launch(io) {
         try {
             repo.setBody(id, text)
             scheduleAutoSync()
@@ -239,7 +246,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun delete(id: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun delete(id: String) = viewModelScope.launch(io) {
         try {
             repo.delete(id)
             _editing.value = null
@@ -268,7 +275,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
      * One guarded sync path. Automatic syncs are silent (no snackbar) and quiet
      * on failure — only the [syncState] indicator reflects them.
      */
-    private fun syncNow(auto: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+    private fun syncNow(auto: Boolean) = viewModelScope.launch(io) {
         if (!repo.isEnrolled()) {
             if (!auto) _status.value = "Appareil non associé"
             return@launch
@@ -289,7 +296,7 @@ class NotesViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun pair(blob: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun pair(blob: String) = viewModelScope.launch(io) {
         _status.value = try {
             repo.pair(blob)
             _folders.value = repo.listFolders()
