@@ -188,3 +188,27 @@ async fn three_devices_converge_through_relay() {
     assert_eq!(b.get_note(&id).unwrap().unwrap().tags, want);
     assert_eq!(c.get_note(&id).unwrap().unwrap().tags, want);
 }
+
+#[tokio::test]
+async fn incremental_pull_only_fetches_the_delta() {
+    let (_url, cfg_a, cfg_b, _storage) = setup().await;
+
+    let mut a = NoteStore::new();
+    let id = a.create_note(1000).unwrap();
+    a.set_title(&id, "v1", 1000).unwrap();
+    let seq1 = sync_once(&cfg_a, &mut a, 0).await.unwrap();
+    let mut b = NoteStore::new();
+    let seq_b1 = sync_once(&cfg_b, &mut b, 0).await.unwrap();
+    assert_eq!(seq_b1, seq1);
+    assert_eq!(b.get_note(&id).unwrap().unwrap().title, "v1");
+
+    // A makes more edits; B catches up from its high-water mark (delta pull).
+    a.set_title(&id, "v2", 1010).unwrap();
+    a.add_tag(&id, "t", 1010).unwrap();
+    let seq2 = sync_once(&cfg_a, &mut a, seq1).await.unwrap();
+    assert!(seq2 > seq1, "new changes advanced the seq");
+    let seq_b2 = sync_once(&cfg_b, &mut b, seq_b1).await.unwrap();
+    assert_eq!(seq_b2, seq2);
+    assert_eq!(b.get_note(&id).unwrap().unwrap().title, "v2");
+    assert_eq!(b.get_note(&id).unwrap().unwrap().tags, vec!["t"]);
+}
