@@ -234,6 +234,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn load_rejects_a_corrupt_store_file() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "pn-corrupt-{}-{}.automerge",
+            std::process::id(),
+            CTR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, b"not an automerge document").unwrap();
+        let store = LocalStore::new_single_process(&path);
+        assert!(store.load().is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn resolve_unique_prefix() {
         let mut s = NoteStore::new();
         let id = s.create_note(1).unwrap();
