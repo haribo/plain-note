@@ -5,6 +5,7 @@ import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteApp
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
+import dev.plainnote.core.NoteVersionInfo
 import java.io.File
 
 /**
@@ -44,6 +45,15 @@ interface NoteRepository {
     fun trash(id: String)
 
     fun getNote(id: String): NoteContent
+
+    /** A note's version timeline, newest first. */
+    fun history(id: String): List<NoteVersionInfo>
+
+    /** A note's content at a given version. */
+    fun noteAt(id: String, versionId: String): NoteContent
+
+    /** Restore a note to a past version (a new forward edit). */
+    fun restoreVersion(id: String, versionId: String)
 
     fun setTitle(id: String, title: String)
 
@@ -105,6 +115,12 @@ class NativeNoteRepository(context: Context) : NoteRepository {
     override fun trash(id: String) = app.trash(id)
 
     override fun getNote(id: String): NoteContent = app.getNote(id)
+
+    override fun history(id: String): List<NoteVersionInfo> = app.history(id)
+
+    override fun noteAt(id: String, versionId: String): NoteContent = app.noteAt(id, versionId)
+
+    override fun restoreVersion(id: String, versionId: String) = app.restoreVersion(id, versionId)
 
     override fun setTitle(id: String, title: String) = app.setTitle(id, title)
 

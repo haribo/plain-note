@@ -8,6 +8,7 @@ import dev.plainnote.app.data.NoteRepository
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
+import dev.plainnote.core.NoteVersionInfo
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -304,6 +305,56 @@ class NotesViewModel(
             "Appareil associé"
         } catch (e: Exception) {
             "Échec de l'association : ${e.message}"
+        }
+    }
+
+    // --- version history (see docs/design/note-history.md) ---
+
+    /** Non-null while the history timeline is open (newest first). */
+    private val _history = MutableStateFlow<List<NoteVersionInfo>?>(null)
+    val history = _history.asStateFlow()
+
+    /** Non-null while previewing a past version (read-only). */
+    private val _versionPreview = MutableStateFlow<NoteContent?>(null)
+    val versionPreview = _versionPreview.asStateFlow()
+
+    fun openHistory() = viewModelScope.launch(io) {
+        val id = _editing.value?.id ?: return@launch
+        try {
+            _history.value = repo.history(id)
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun closeHistory() {
+        _history.value = null
+        _versionPreview.value = null
+    }
+
+    fun previewVersion(versionId: String) = viewModelScope.launch(io) {
+        val id = _editing.value?.id ?: return@launch
+        try {
+            _versionPreview.value = repo.noteAt(id, versionId)
+        } catch (e: Exception) {
+            report(e)
+        }
+    }
+
+    fun closePreview() {
+        _versionPreview.value = null
+    }
+
+    fun restoreVersion(versionId: String) = viewModelScope.launch(io) {
+        val id = _editing.value?.id ?: return@launch
+        try {
+            repo.restoreVersion(id, versionId)
+            _editing.value = repo.getNote(id) // refresh the open editor
+            _versionPreview.value = null
+            _history.value = null
+            reloadNotes()
+        } catch (e: Exception) {
+            report(e)
         }
     }
 
