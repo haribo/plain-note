@@ -45,8 +45,17 @@ enum Command {
         #[arg(long)]
         tag: Option<String>,
     },
-    /// Print a note's Markdown body
-    Show { id: String },
+    /// Print a note's Markdown body (optionally an older version, see `history`)
+    Show {
+        id: String,
+        /// A version from `history`: an index (1 = newest) or a version id
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// List a note's version history, newest first
+    History { id: String },
+    /// Restore a note to an older version (a version index or id, see `history`)
+    Restore { id: String, version: String },
     /// Edit a note's body in $EDITOR
     #[command(visible_alias = "e")]
     Edit { id: String },
@@ -200,12 +209,32 @@ async fn main() -> Result<()> {
             let notes = commands::search(&store, &query)?;
             print_notes(&store, &notes)?;
         }
-        Command::Show { id } => {
-            let note = commands::get(&store, &id)?;
+        Command::Show { id, at } => {
+            let note = match at {
+                Some(reference) => {
+                    let version = resolve_version(&store, &id, &reference)?;
+                    commands::note_at(&store, &id, &version)?
+                }
+                None => commands::get(&store, &id)?,
+            };
             print!("{}", note.text);
             if !note.text.ends_with('\n') {
                 println!();
             }
+        }
+        Command::History { id } => {
+            let versions = commands::history(&store, &id)?;
+            if versions.is_empty() {
+                println!("(no history)");
+            }
+            for (i, v) in versions.iter().enumerate() {
+                println!("{}\t{}\t{}", i + 1, v.timestamp, short(&v.author));
+            }
+        }
+        Command::Restore { id, version } => {
+            let version_id = resolve_version(&store, &id, &version)?;
+            let id = commands::restore_version(&store, now, &id, &version_id)?;
+            println!("restored {}", short(id.as_str()));
         }
         Command::Edit { id } => {
             let current = commands::get(&store, &id)?.text;
@@ -347,6 +376,21 @@ async fn run_remote(cmd: RemoteCmd) -> Result<()> {
 
 fn short(id: &str) -> &str {
     &id[..SHORT_ID.min(id.len())]
+}
+
+/// Resolve a version reference to a version id: a 1-based index into `history`
+/// (1 = newest), or a raw version id passed through as-is.
+fn resolve_version(store: &LocalStore, id: &str, reference: &str) -> Result<String> {
+    if let Ok(n) = reference.parse::<usize>() {
+        let versions = commands::history(store, id)?;
+        let v = n
+            .checked_sub(1)
+            .and_then(|i| versions.get(i))
+            .ok_or_else(|| anyhow::anyhow!("no version {reference} (see `pn history`)"))?;
+        Ok(v.version_id.clone())
+    } else {
+        Ok(reference.to_string())
+    }
 }
 
 fn print_notes(store: &LocalStore, notes: &[note_core::NoteMeta]) -> Result<()> {
