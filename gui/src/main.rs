@@ -13,7 +13,7 @@ use adw::prelude::*;
 use gtk::glib;
 use note_core::{FolderId, NoteId, NoteStore, ROOT_FOLDER};
 use plain_note_client::store::{self, LocalStore};
-use plain_note_client::{config, remote};
+use plain_note_client::{commands, config, remote};
 
 const APP_ID: &str = "dev.plainnote.PlainNote";
 
@@ -2122,6 +2122,9 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     let source_toggle = gtk::ToggleButton::with_label("Source");
     source_toggle.set_tooltip_text(Some("Afficher le Markdown brut"));
     source_toggle.add_css_class("flat");
+    let history_btn = gtk::Button::from_icon_name("document-open-recent-symbolic");
+    history_btn.set_tooltip_text(Some("Historique des versions"));
+    history_btn.add_css_class("flat");
     let count_label = gtk::Label::new(None);
     count_label.add_css_class("dim-label");
     count_label.add_css_class("caption");
@@ -2133,7 +2136,18 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     footer.set_margin_top(4);
     footer.set_margin_bottom(6);
     footer.append(&source_toggle);
+    footer.append(&history_btn);
     footer.append(&count_label);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        history_btn.connect_clicked(move |btn| {
+            open_history_dialog(btn, &ui, &state, &id, &buffer, &title);
+        });
+    }
 
     // Attachments row: one chip per attachment + an "add" button. The button is
     // only sensitive when the device is enrolled (attach needs the relay).
@@ -2985,6 +2999,224 @@ fn build_enrolled_body(body: &gtk::Box, settings: &config::Settings) {
     });
     *holder.borrow_mut() = Some(refresh.clone());
     list_btn.connect_clicked(move |_| refresh());
+}
+
+/// Held reference to the history timeline's repaint closure, so a preview's
+/// "Back" can call it (self-reference through an `Rc` cell).
+type HistoryBack = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+/// Format a unix-millis timestamp as a local, human date for the history list.
+fn format_ts(ts: i64) -> String {
+    if let Ok(dt) = gtk::glib::DateTime::from_unix_local(ts / 1000)
+        && let Ok(s) = dt.format("%e %b %Y, %H:%M")
+    {
+        return s.to_string();
+    }
+    ts.to_string()
+}
+
+/// Per-note version history: a timeline, a read-only preview of any version, and
+/// restore. Reads are local (`commands::history`/`note_at`); restore is a
+/// forward edit that then refreshes the open editor. See docs/design/note-history.md.
+fn open_history_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    buffer: &gtk::TextBuffer,
+    title: &gtk::Entry,
+) {
+    let window = anchor.root().and_downcast::<gtk::Window>();
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Historique");
+    dialog.set_content_width(460);
+    dialog.set_content_height(560);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    let header = adw::HeaderBar::new();
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&header);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&body)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    tv.set_content(Some(&scroll));
+    dialog.set_child(Some(&tv));
+
+    let versions = commands::history(&state.borrow().store, id.as_str()).unwrap_or_default();
+
+    // `render_list` repaints the timeline; a preview's "Back" calls it again, so
+    // it is held indirectly to allow the self-reference.
+    type Render = Rc<dyn Fn()>;
+    let holder: Rc<RefCell<Option<Render>>> = Rc::new(RefCell::new(None));
+    let render_list: Render = Rc::new({
+        let body = body.clone();
+        let dialog = dialog.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        let holder = holder.clone();
+        move || {
+            while let Some(c) = body.first_child() {
+                body.remove(&c);
+            }
+            if versions.is_empty() {
+                let l = gtk::Label::new(Some("Aucune version antérieure."));
+                l.add_css_class("dim-label");
+                l.set_margin_top(24);
+                body.append(&l);
+                return;
+            }
+            let list = gtk::ListBox::new();
+            list.set_selection_mode(gtk::SelectionMode::None);
+            list.add_css_class("boxed-list");
+            for (i, v) in versions.iter().enumerate() {
+                let row = adw::ActionRow::new();
+                row.set_title(&format_ts(v.timestamp));
+                row.set_activatable(true);
+                if i == 0 {
+                    let chip = gtk::Label::new(Some("Actuel"));
+                    chip.add_css_class("accent");
+                    chip.add_css_class("caption-heading");
+                    chip.set_valign(gtk::Align::Center);
+                    row.add_suffix(&chip);
+                } else {
+                    let arrow = gtk::Image::from_icon_name("go-next-symbolic");
+                    row.add_suffix(&arrow);
+                }
+                let version_id = v.version_id.clone();
+                let body = body.clone();
+                let dialog = dialog.clone();
+                let ui = ui.clone();
+                let state = state.clone();
+                let id = id.clone();
+                let buffer = buffer.clone();
+                let title = title.clone();
+                let holder = holder.clone();
+                row.connect_activated(move |_| {
+                    history_preview(
+                        &body,
+                        &dialog,
+                        &ui,
+                        &state,
+                        &id,
+                        &buffer,
+                        &title,
+                        &version_id,
+                        &holder,
+                    );
+                });
+                list.append(&row);
+            }
+            body.append(&list);
+        }
+    });
+    *holder.borrow_mut() = Some(render_list.clone());
+    render_list();
+    dialog.present(window.as_ref());
+}
+
+/// A read-only preview of one version, with Restore and Back.
+#[allow(clippy::too_many_arguments)]
+fn history_preview(
+    body: &gtk::Box,
+    dialog: &adw::Dialog,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    buffer: &gtk::TextBuffer,
+    title: &gtk::Entry,
+    version_id: &str,
+    back: &HistoryBack,
+) {
+    let Ok(snapshot) = commands::note_at(&state.borrow().store, id.as_str(), version_id) else {
+        if let Some(f) = back.borrow().as_ref() {
+            f();
+        }
+        return;
+    };
+    while let Some(c) = body.first_child() {
+        body.remove(&c);
+    }
+    let banner = gtk::Label::new(Some(
+        "Version en lecture seule — le texte actuel n'est pas modifié.",
+    ));
+    banner.add_css_class("dim-label");
+    banner.set_halign(gtk::Align::Start);
+    banner.set_wrap(true);
+    body.append(&banner);
+
+    let preview = gtk::TextView::new();
+    preview.set_editable(false);
+    preview.set_cursor_visible(false);
+    preview.set_wrap_mode(gtk::WrapMode::WordChar);
+    preview.set_left_margin(8);
+    preview.set_right_margin(8);
+    preview.set_top_margin(8);
+    let heading = if snapshot.title.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", snapshot.title)
+    };
+    preview
+        .buffer()
+        .set_text(&format!("{heading}{}", snapshot.text));
+    let sw = gtk::ScrolledWindow::builder()
+        .child(&preview)
+        .vexpand(true)
+        .build();
+    body.append(&sw);
+
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    bar.set_halign(gtk::Align::End);
+    let back_btn = gtk::Button::with_label("Retour");
+    {
+        let back = back.clone();
+        back_btn.connect_clicked(move |_| {
+            if let Some(f) = back.borrow().as_ref() {
+                f();
+            }
+        });
+    }
+    let restore_btn = gtk::Button::with_label("Restaurer cette version");
+    restore_btn.add_css_class("suggested-action");
+    {
+        let dialog = dialog.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        let version_id = version_id.to_string();
+        restore_btn.connect_clicked(move |_| {
+            let now = store::now_millis();
+            if commands::restore_version(&state.borrow().store, now, id.as_str(), &version_id)
+                .is_err()
+            {
+                return;
+            }
+            // Refresh the open editor from the restored note without re-saving.
+            if let Ok(note) = commands::get(&state.borrow().store, id.as_str()) {
+                state.borrow_mut().loading = true;
+                title.set_text(&note.title);
+                buffer.set_text(&note.text);
+                state.borrow_mut().loading = false;
+            }
+            reload_from_disk(&state);
+            rebuild_tree(&ui, &state);
+            dialog.close();
+        });
+    }
+    bar.append(&back_btn);
+    bar.append(&restore_btn);
+    body.append(&bar);
 }
 
 fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
