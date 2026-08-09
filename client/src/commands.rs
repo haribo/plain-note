@@ -6,7 +6,7 @@
 //! printing and the editor/clock wiring.
 
 use anyhow::{Result, anyhow};
-use note_core::{FolderId, FolderMeta, Note, NoteId, NoteMeta, Timestamp};
+use note_core::{FolderId, FolderMeta, Note, NoteId, NoteMeta, NoteVersion, Timestamp};
 
 use crate::store::{LocalStore, resolve_folder_id, resolve_id, resolve_trashed_id};
 
@@ -67,6 +67,37 @@ pub fn get(store: &LocalStore, id_prefix: &str) -> Result<Note> {
     store.read(|doc| {
         let id = resolve_id(doc, id_prefix)?;
         doc.get_note(&id)?.ok_or_else(|| anyhow!("note vanished"))
+    })
+}
+
+/// A note's version timeline, newest first.
+pub fn history(store: &LocalStore, id_prefix: &str) -> Result<Vec<NoteVersion>> {
+    store.read_mut(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        Ok(doc.note_history(&id)?)
+    })
+}
+
+/// A note's content at a given version.
+pub fn note_at(store: &LocalStore, id_prefix: &str, version_id: &str) -> Result<Note> {
+    store.read(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.note_at(&id, version_id)?
+            .ok_or_else(|| anyhow!("no such version"))
+    })
+}
+
+/// Restore a note to a past version (a new forward edit).
+pub fn restore_version(
+    store: &LocalStore,
+    now: Timestamp,
+    id_prefix: &str,
+    version_id: &str,
+) -> Result<NoteId> {
+    store.update(|doc| {
+        let id = resolve_id(doc, id_prefix)?;
+        doc.restore(&id, version_id, now)?;
+        Ok(id)
     })
 }
 
