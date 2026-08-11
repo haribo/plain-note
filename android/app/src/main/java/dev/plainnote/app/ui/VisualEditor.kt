@@ -42,6 +42,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
@@ -327,10 +328,15 @@ private val MARKERS = listOf(
 private fun hideMarkers(linkColor: Color) =
     VisualTransformation { text -> transformHidingMarkers(text.text, linkColor) }
 
-internal fun transformHidingMarkers(src: String, linkColor: Color = Color.Unspecified): TransformedText {
+internal fun transformHidingMarkers(
+    src: String,
+    linkColor: Color = Color.Unspecified,
+    linkable: Boolean = false,
+): TransformedText {
     val n = src.length
     val dropped = BooleanArray(n)
     val flags = IntArray(n)
+    val links = mutableListOf<Triple<Int, Int, String>>() // labelStartSrc, labelEndSrc, href
 
     // Recursive descent so nested marks (e.g. `***x***` = bold+italic) stack.
     fun parse(lo: Int, hi: Int, base: Int) {
@@ -344,6 +350,7 @@ internal fun transformHidingMarkers(src: String, linkColor: Color = Color.Unspec
                     val rp = src.indexOf(')', rb + 2)
                     if (rp in (rb + 2)..(hi - 1)) {
                         dropped[i] = true
+                        links.add(Triple(i + 1, rb, src.substring(rb + 2, rp)))
                         parse(i + 1, rb, base or M_LINK)
                         for (k in rb..rp) dropped[k] = true
                         i = rp + 1
@@ -394,6 +401,14 @@ internal fun transformHidingMarkers(src: String, linkColor: Color = Color.Unspec
     val ann = buildAnnotatedString {
         append(sb.toString())
         for ((start, end, f) in spans) addStyle(spanFor(f, linkColor), start, end)
+        // Read-only view: make the label open its URL on tap (Text handles it).
+        if (linkable) {
+            for ((ls, le, href) in links) {
+                val ts = o2t[ls]
+                val te = o2t[le]
+                if (te > ts) addLink(LinkAnnotation.Url(href), ts, te)
+            }
+        }
     }
     val mapping = object : OffsetMapping {
         override fun originalToTransformed(offset: Int): Int = o2t[offset.coerceIn(0, n)]
@@ -494,7 +509,7 @@ private fun ViewRow(line: Line, ordinal: Int) {
  * Delegates to the editor's transform so both render identically.
  */
 private fun renderInline(text: String, linkColor: Color): AnnotatedString =
-    transformHidingMarkers(text, linkColor).text
+    transformHidingMarkers(text, linkColor, linkable = true).text
 
 private fun headingSize(level: Int) = when (level) {
     1 -> 24.sp

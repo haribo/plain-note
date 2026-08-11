@@ -29,7 +29,7 @@ fi
 # Install: https://github.com/gitleaks/gitleaks
 
 if command -v gitleaks > /dev/null 2>&1; then
-  if ! gitleaks detect --staged --no-banner --redact; then
+  if ! gitleaks git --staged --no-banner --redact; then
     echo ""
     echo "ERROR: gitleaks detected potential secrets in staged files."
     echo "Review the findings above before committing."

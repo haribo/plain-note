@@ -1,4 +1,6 @@
-# Plain Note
+<h1>
+  <img src="assets/plane.svg" alt="" height="40">&nbsp; Plain Note
+</h1>
 
 Open-source, cross-platform note manager with **end-to-end encrypted**
 synchronization through a **zero-knowledge relay**.

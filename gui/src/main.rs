@@ -13,7 +13,7 @@ use adw::prelude::*;
 use gtk::glib;
 use note_core::{FolderId, NoteId, NoteStore, ROOT_FOLDER};
 use plain_note_client::store::{self, LocalStore};
-use plain_note_client::{config, remote};
+use plain_note_client::{commands, config, remote};
 
 const APP_ID: &str = "dev.plainnote.PlainNote";
 
@@ -170,6 +170,18 @@ fn build_ui(app: &adw::Application) {
     sync_label.add_css_class("dim-label");
     sync_label.add_css_class("caption");
     content_header.pack_end(&sync_label);
+
+    let sync_btn = gtk::Button::from_icon_name("emblem-synchronizing-symbolic");
+    sync_btn.add_css_class("flat");
+    sync_btn.set_tooltip_text(Some("Synchronisation"));
+    content_header.pack_end(&sync_btn);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sync_label = sync_label.clone();
+        sync_btn.connect_clicked(move |btn| open_sync_dialog(btn, &ui, &state, &sync_label));
+    }
+
     start_auto_sync(&ui, &state, &sync_label);
 
     // Row selection: folders toggle, notes open.
@@ -608,133 +620,369 @@ fn note_title(t: &str) -> &str {
     if t.is_empty() { "(sans titre)" } else { t }
 }
 
-/// Escape text for inclusion in Pango markup.
-fn esc(s: &str) -> String {
-    glib::markup_escape_text(s).to_string()
+// --- WYSIWYG inline styling (pure, unit-tested) ---
+
+/// A styled or hidden span over the source, in CHARACTER offsets (GtkTextBuffer
+/// iters use character offsets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    Bold,
+    Italic,
+    Code,
+    Strike,
+    Hidden,
+    H1,
+    H2,
+    H3,
+    Link,
+    Quote,
+    CodeBlock,
+    ListItem,
 }
 
-/// Emphasis with `_`; escapes the leaf text.
-fn ital_underscore(s: &str) -> String {
-    let mut out = String::new();
-    for (i, p) in s.split('_').enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<i>");
-            out.push_str(&esc(p));
-            out.push_str("</i>");
-        } else {
-            out.push_str(&esc(p));
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Span {
+    start: usize,
+    end: usize,
+    kind: SpanKind,
+}
+
+/// Inline Markdown marks → styling spans, with the markers themselves returned
+/// as `Hidden`. Nested marks stack (`***x***` = bold+italic). An unterminated or
+/// empty marker is left literal (no span). Offsets are character indices.
+fn inline_spans(text: &str) -> Vec<Span> {
+    let chars: Vec<char> = text.chars().collect();
+    // Longest markers first so `***`/`**` win over `*`.
+    let markers: [(&str, &[SpanKind]); 5] = [
+        ("***", &[SpanKind::Bold, SpanKind::Italic]),
+        ("**", &[SpanKind::Bold]),
+        ("~~", &[SpanKind::Strike]),
+        ("*", &[SpanKind::Italic]),
+        ("`", &[SpanKind::Code]),
+    ];
+    let mut out = Vec::new();
+    parse_marks(&chars, 0, chars.len(), &markers, &mut out);
     out
 }
 
-/// Emphasis with `*`, then `_`.
-fn ital_star(s: &str) -> String {
-    let mut out = String::new();
-    for (i, p) in s.split('*').enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<i>");
-            out.push_str(&ital_underscore(p));
-            out.push_str("</i>");
-        } else {
-            out.push_str(&ital_underscore(p));
-        }
-    }
-    out
+fn matches_at(chars: &[char], i: usize, m: &[char]) -> bool {
+    i + m.len() <= chars.len() && chars[i..i + m.len()] == *m
 }
 
-/// Bold `**`, then italics. Toggle-splitting keeps every tag balanced even for
-/// unmatched delimiters, so the result is always valid Pango markup.
-fn emphasis(s: &str) -> String {
-    let mut out = String::new();
-    for (i, p) in s.split("**").enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<b>");
-            out.push_str(&ital_star(p));
-            out.push_str("</b>");
-        } else {
-            out.push_str(&ital_star(p));
+/// First index >= `from` (with `close + m.len() <= hi`) where marker `m` recurs.
+fn find_close(chars: &[char], from: usize, hi: usize, m: &[char]) -> Option<usize> {
+    let mut j = from;
+    while j + m.len() <= hi {
+        if chars[j..j + m.len()] == *m {
+            return Some(j);
         }
-    }
-    out
-}
-
-/// Render one line's inline Markdown (code spans, bold, italics) to Pango.
-fn inline_md(s: &str) -> String {
-    let mut out = String::new();
-    for (i, seg) in s.split('`').enumerate() {
-        if i % 2 == 1 {
-            out.push_str("<tt>");
-            out.push_str(&esc(seg));
-            out.push_str("</tt>");
-        } else {
-            out.push_str(&emphasis(seg));
-        }
-    }
-    out
-}
-
-/// A leading-`#` heading: returns the level (1..=6) and the remaining text.
-fn heading(line: &str) -> Option<(usize, &str)> {
-    let hashes = line.len() - line.trim_start_matches('#').len();
-    if (1..=6).contains(&hashes)
-        && let Some(rest) = line[hashes..].strip_prefix(' ')
-    {
-        return Some((hashes, rest));
+        j += 1;
     }
     None
 }
 
-/// Render Markdown to Pango markup for the preview pane. Deliberately small:
-/// headings, bold/italic, inline code, fenced code blocks and bullet lists.
-fn md_to_pango(src: &str) -> String {
-    let mut out = String::new();
-    let mut in_code = false;
-    let mut first = true;
-    for line in src.split('\n') {
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
-            continue;
+fn parse_marks(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    markers: &[(&str, &[SpanKind])],
+    out: &mut Vec<Span>,
+) {
+    let mut i = lo;
+    while i < hi {
+        // Link `[label](url)`: keep the label (styled), hide `[`, `]`, `(url)`.
+        if chars[i] == '[' {
+            let rb = find_close(chars, i + 1, hi, &[']']);
+            if let Some(rb) = rb
+                && rb > i + 1
+                && rb + 1 < hi
+                && chars[rb + 1] == '('
+                && let Some(rp) = find_close(chars, rb + 2, hi, &[')'])
+            {
+                out.push(Span {
+                    start: i,
+                    end: i + 1,
+                    kind: SpanKind::Hidden,
+                });
+                out.push(Span {
+                    start: i + 1,
+                    end: rb,
+                    kind: SpanKind::Link,
+                });
+                parse_marks(chars, i + 1, rb, markers, out); // marks inside the label
+                out.push(Span {
+                    start: rb,
+                    end: rp + 1,
+                    kind: SpanKind::Hidden,
+                });
+                i = rp + 1;
+                continue;
+            }
         }
-        if !first {
-            out.push('\n');
+        let mut matched = false;
+        for (m, kinds) in markers {
+            let mc: Vec<char> = m.chars().collect();
+            let len = mc.len();
+            if !matches_at(chars, i, &mc) {
+                continue;
+            }
+            // A marker matches only with non-empty content and a close before `hi`.
+            if let Some(c) = find_close(chars, i + len, hi, &mc)
+                && c > i + len
+            {
+                out.push(Span {
+                    start: i,
+                    end: i + len,
+                    kind: SpanKind::Hidden,
+                });
+                for k in *kinds {
+                    out.push(Span {
+                        start: i + len,
+                        end: c,
+                        kind: *k,
+                    });
+                }
+                parse_marks(chars, i + len, c, markers, out);
+                out.push(Span {
+                    start: c,
+                    end: c + len,
+                    kind: SpanKind::Hidden,
+                });
+                i = c + len;
+                matched = true;
+                break;
+            }
         }
-        first = false;
-
-        if in_code {
-            out.push_str("<tt>");
-            out.push_str(&esc(line));
-            out.push_str("</tt>");
-            continue;
-        }
-
-        let trimmed = line.trim_start();
-        if let Some((level, rest)) = heading(trimmed) {
-            let size = match level {
-                1 => "xx-large",
-                2 => "x-large",
-                3 => "large",
-                _ => "medium",
-            };
-            out.push_str(&format!(
-                "<span size=\"{size}\" weight=\"bold\">{}</span>",
-                inline_md(rest)
-            ));
-        } else if let Some(rest) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-        {
-            out.push_str("• ");
-            out.push_str(&inline_md(rest));
-        } else if let Some(rest) = trimmed.strip_prefix("> ") {
-            out.push_str("<i>");
-            out.push_str(&inline_md(rest));
-            out.push_str("</i>");
-        } else {
-            out.push_str(&inline_md(line));
+        if !matched {
+            i += 1;
         }
     }
+}
+
+/// A heading prefix (`#`..`######` + space): returns the level (capped at 3 for
+/// the editor) and the prefix length in chars (hashes + the space).
+fn heading_prefix(line: &str) -> Option<(u8, usize)> {
+    let hashes = line.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && line.chars().nth(hashes) == Some(' ') {
+        return Some((hashes.min(3) as u8, hashes + 1));
+    }
+    None
+}
+
+/// All WYSIWYG spans over the full text (char offsets): heading prefixes hidden
+/// and their content sized (H1/H2/H3), plus inline marks (markers hidden).
+fn spans(text: &str) -> Vec<Span> {
+    let mut out = Vec::new();
+    let mut base = 0usize; // char offset of the current line's start
+    let mut in_code = false; // inside a ``` fenced block
+    for line in text.split('\n') {
+        let ll = line.chars().count();
+        if line.starts_with("```") {
+            // Fence line (with optional language): hidden; toggles code state.
+            out.push(Span {
+                start: base,
+                end: base + ll,
+                kind: SpanKind::Hidden,
+            });
+            in_code = !in_code;
+        } else if in_code {
+            // Verbatim: monospace, no inline/heading/quote parsing.
+            if ll > 0 {
+                out.push(Span {
+                    start: base,
+                    end: base + ll,
+                    kind: SpanKind::CodeBlock,
+                });
+            }
+        } else if let Some((level, prefix)) = heading_prefix(line) {
+            out.push(Span {
+                start: base,
+                end: base + prefix,
+                kind: SpanKind::Hidden,
+            });
+            let kind = match level {
+                1 => SpanKind::H1,
+                2 => SpanKind::H2,
+                _ => SpanKind::H3,
+            };
+            out.push(Span {
+                start: base + prefix,
+                end: base + ll,
+                kind,
+            });
+            let content: String = line.chars().skip(prefix).collect();
+            for s in inline_spans(&content) {
+                out.push(Span {
+                    start: base + prefix + s.start,
+                    end: base + prefix + s.end,
+                    kind: s.kind,
+                });
+            }
+        } else if let Some((mlen, _)) = line_list_marker(line) {
+            // Hide the source marker; the gutter glyph is drawn by the view.
+            out.push(Span {
+                start: base,
+                end: base + mlen,
+                kind: SpanKind::Hidden,
+            });
+            out.push(Span {
+                start: base,
+                end: base + ll,
+                kind: SpanKind::ListItem, // indent (left_margin) leaves a gutter
+            });
+            let content: String = line.chars().skip(mlen).collect();
+            for s in inline_spans(&content) {
+                out.push(Span {
+                    start: base + mlen + s.start,
+                    end: base + mlen + s.end,
+                    kind: s.kind,
+                });
+            }
+        } else if let Some(content) = line.strip_prefix("> ") {
+            out.push(Span {
+                start: base,
+                end: base + 2,
+                kind: SpanKind::Hidden,
+            });
+            // Quote covers the whole line (including the hidden `> `) so its
+            // paragraph `left_margin` indents from the line start; the prefix
+            // stays invisible via the Hidden span above.
+            out.push(Span {
+                start: base,
+                end: base + ll,
+                kind: SpanKind::Quote,
+            });
+            for s in inline_spans(content) {
+                out.push(Span {
+                    start: base + 2 + s.start,
+                    end: base + 2 + s.end,
+                    kind: s.kind,
+                });
+            }
+        } else {
+            for s in inline_spans(line) {
+                out.push(Span {
+                    start: base + s.start,
+                    end: base + s.end,
+                    kind: s.kind,
+                });
+            }
+        }
+        base += ll + 1; // account for the '\n'
+    }
     out
+}
+
+/// URL of the link whose *label* contains char `offset`, if any. Mirrors what is
+/// rendered as a link: code fences are skipped, and only the visible label (not
+/// the hidden `](url)`) is clickable. Used to follow links on Ctrl+click.
+fn link_at(text: &str, offset: usize) -> Option<String> {
+    let mut base = 0usize;
+    let mut in_code = false;
+    for line in text.split('\n') {
+        let ll = line.chars().count();
+        if line.starts_with("```") {
+            in_code = !in_code;
+        } else if !in_code && offset >= base && offset <= base + ll {
+            return link_in_line(line, offset - base);
+        }
+        base += ll + 1;
+    }
+    None
+}
+
+/// URL of the `[label](url)` whose label contains the line-local char `off`.
+fn link_in_line(line: &str, off: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if chars[i] == '['
+            && let Some(rb) = find_close(&chars, i + 1, n, &[']'])
+            && rb > i + 1
+            && rb + 1 < n
+            && chars[rb + 1] == '('
+            && let Some(rp) = find_close(&chars, rb + 2, n, &[')'])
+        {
+            if off > i && off < rb {
+                let url: String = chars[rb + 2..rp].iter().collect();
+                if !url.is_empty() {
+                    return Some(url);
+                }
+            }
+            i = rp + 1;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The leading list marker of `line`, if any: returns its length in chars and
+/// the glyph to draw in the gutter. `- `/`* `/`+ ` render as a bullet; `N. `
+/// keeps the number. The marker itself is hidden in the source; the view draws
+/// the returned glyph in the left gutter.
+fn line_list_marker(line: &str) -> Option<(usize, String)> {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        return Some((2, "•".to_string()));
+    }
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        let rest: String = line.chars().skip(digits).collect();
+        if rest.starts_with(". ") {
+            let num: String = line.chars().take(digits).collect();
+            return Some((digits + 2, format!("{num}.")));
+        }
+    }
+    None
+}
+
+/// For each list line, the char offset of its start (the hidden marker sits at
+/// the paragraph's left edge) and the gutter glyph to draw. Skips ``` fenced
+/// blocks. The view draws the glyph; `spans` hides the source markers in step.
+fn list_markers(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut base = 0usize;
+    let mut in_code = false;
+    for line in text.split('\n') {
+        let ll = line.chars().count();
+        if line.starts_with("```") {
+            in_code = !in_code;
+        } else if !in_code && let Some((_, draw)) = line_list_marker(line) {
+            out.push((base, draw));
+        }
+        base += ll + 1;
+    }
+    out
+}
+
+/// Render `data` as a QR code into an RGBA8 buffer: `scale` pixels per module,
+/// dark modules black on white, with a 4-module quiet zone. Returns the buffer
+/// and the square side in pixels. Errors if `data` is too large for a QR code.
+fn qr_rgba(data: &str, scale: usize) -> anyhow::Result<(Vec<u8>, usize)> {
+    const QUIET: usize = 4;
+    let code = qrcode::QrCode::new(data.as_bytes())?;
+    let w = code.width();
+    let side = (w + QUIET * 2) * scale;
+    let colors = code.to_colors();
+    let mut rgba = vec![255u8; side * side * 4]; // white background
+    for my in 0..w {
+        for mx in 0..w {
+            if colors[my * w + mx] == qrcode::Color::Dark {
+                for py in 0..scale {
+                    for px in 0..scale {
+                        let x = (QUIET + mx) * scale + px;
+                        let y = (QUIET + my) * scale + py;
+                        let idx = (y * side + x) * 4;
+                        rgba[idx] = 0;
+                        rgba[idx + 1] = 0;
+                        rgba[idx + 2] = 0;
+                    }
+                }
+            }
+        }
+    }
+    Ok((rgba, side))
 }
 
 // --- expanded-folders persistence (device-local UI state) ---
@@ -812,12 +1060,50 @@ fn subtree_note_count(
 // --- Markdown formatting transforms (pure, unit-tested) ---
 
 /// Wrap `text` with `marker`, or unwrap it if already wrapped (toggle).
-fn wrap_or_unwrap(text: &str, marker: &str) -> String {
-    if text.len() >= 2 * marker.len() && text.starts_with(marker) && text.ends_with(marker) {
-        text[marker.len()..text.len() - marker.len()].to_string()
+/// Toggle an inline `marker` (`**`, `*`, `` ` ``, `~~`) around the char range
+/// `[start, end)` of `text`. Operates on the FULL text so it detects markers
+/// sitting just *outside* the selection — which is what makes un-styling work
+/// when the markers are hidden in the WYSIWYG view (the user selects only the
+/// visible content). Returns the new text and the new selection (char offsets),
+/// placed on the content.
+fn toggle_wrap(text: &str, start: usize, end: usize, marker: &str) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let mc: Vec<char> = marker.chars().collect();
+    let m = mc.len();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+
+    // Markers immediately outside the selection (hidden-marker case).
+    let outside = start >= m
+        && end + m <= n
+        && chars[start - m..start] == mc[..]
+        && chars[end..end + m] == mc[..];
+    // Markers inside the selection (it includes them).
+    let inside =
+        end >= start + 2 * m && chars[start..start + m] == mc[..] && chars[end - m..end] == mc[..];
+
+    let mut out: Vec<char> = Vec::new();
+    let (ns, ne);
+    if outside {
+        out.extend_from_slice(&chars[..start - m]);
+        out.extend_from_slice(&chars[start..end]);
+        out.extend_from_slice(&chars[end + m..]);
+        (ns, ne) = (start - m, end - m);
+    } else if inside {
+        out.extend_from_slice(&chars[..start]);
+        out.extend_from_slice(&chars[start + m..end - m]);
+        out.extend_from_slice(&chars[end..]);
+        (ns, ne) = (start, end - 2 * m);
     } else {
-        format!("{marker}{text}{marker}")
+        out.extend_from_slice(&chars[..start]);
+        out.extend_from_slice(&mc);
+        out.extend_from_slice(&chars[start..end]);
+        out.extend_from_slice(&mc);
+        out.extend_from_slice(&chars[end..]);
+        (ns, ne) = (start + m, end + m);
     }
+    (out.into_iter().collect(), ns, ne)
 }
 
 /// The heading level of a line (1..=6), or 0 if it is not a heading.
@@ -863,6 +1149,85 @@ fn toggle_line_prefix(line: &str, prefix: &str) -> String {
     } else {
         format!("{prefix}{}", strip_list_marker(line))
     }
+}
+
+/// Char offset of the start of the line containing `pos`.
+fn line_start(chars: &[char], pos: usize) -> usize {
+    let mut i = pos.min(chars.len());
+    while i > 0 && chars[i - 1] != '\n' {
+        i -= 1;
+    }
+    i
+}
+
+/// Char offset of the end of the line containing `pos` (before the next `\n`).
+fn line_end(chars: &[char], pos: usize) -> usize {
+    let mut i = pos.min(chars.len());
+    while i < chars.len() && chars[i] != '\n' {
+        i += 1;
+    }
+    i
+}
+
+/// Apply a per-line transform to every line the char range `[start, end)` spans
+/// (expanded to whole lines). Returns the new text and the selection covering
+/// the transformed block. Pure core of `transform_lines`.
+fn transform_block(
+    text: &str,
+    start: usize,
+    end: usize,
+    f: impl Fn(&str) -> String,
+) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+    let bs = line_start(&chars, start);
+    let be = line_end(&chars, end);
+    let block: String = chars[bs..be].iter().collect();
+    let new: String = block.split('\n').map(f).collect::<Vec<_>>().join("\n");
+    let mut out: String = chars[..bs].iter().collect();
+    out.push_str(&new);
+    out.extend(chars[be..].iter());
+    (out, bs, bs + new.chars().count())
+}
+
+/// Wrap the char range `[start, end)` in a fenced code block. Returns the new
+/// text and a caret position on the content line. Pure core of `apply_code_block`.
+fn code_block(text: &str, start: usize, end: usize) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+    let sel: String = chars[start..end].iter().collect();
+    let inserted = format!("```\n{sel}\n```");
+    let mut out: String = chars[..start].iter().collect();
+    out.push_str(&inserted);
+    out.extend(chars[end..].iter());
+    let caret = start + 4 + sel.chars().count(); // after "```\n" + selection
+    (out, caret, caret)
+}
+
+/// Insert a Markdown link around the char range `[start, end)` (its text becomes
+/// the label, or "texte" if empty). Returns the new text and the selection over
+/// the `url` placeholder. Pure core of `apply_link`.
+fn insert_link(text: &str, start: usize, end: usize) -> (String, usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let start = start.min(n);
+    let end = end.min(n).max(start);
+    let sel: String = chars[start..end].iter().collect();
+    let label = if sel.is_empty() {
+        "texte".to_string()
+    } else {
+        sel
+    };
+    let inserted = format!("[{label}](url)");
+    let mut out: String = chars[..start].iter().collect();
+    out.push_str(&inserted);
+    out.extend(chars[end..].iter());
+    let url_start = start + 1 + label.chars().count() + 2; // after "[label]("
+    (out, url_start, url_start + 3)
 }
 
 /// A French word/character summary, e.g. "42 mots · 210 caractères".
@@ -1383,77 +1748,53 @@ fn sel_bounds(b: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
     }
 }
 
+/// Full Markdown source of `b`, including the WYSIWYG-hidden marker chars.
+/// Reading with `include_hidden_chars = false` drops runs covered by the
+/// `invisible` tags (markers like `**`, `#`, `- `), which would corrupt the note
+/// on save or rewrite it without its formatting on a toolbar action (#154).
+fn buffer_source(b: &gtk::TextBuffer) -> String {
+    b.text(&b.start_iter(), &b.end_iter(), true).to_string()
+}
+
 /// Wrap/unwrap the selection with an inline `marker` (e.g. `**`, `*`, `` ` ``).
 fn apply_wrap(b: &gtk::TextBuffer, marker: &str) {
-    let (mut s, mut e) = sel_bounds(b);
-    let off = s.offset();
-    let text = b.text(&s, &e, false).to_string();
-    let empty = text.is_empty();
-    let new = wrap_or_unwrap(&text, marker);
-    b.delete(&mut s, &mut e);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    if empty {
-        let cur = b.iter_at_offset(off + marker.chars().count() as i32);
-        b.place_cursor(&cur);
-    } else {
-        let a = b.iter_at_offset(off);
-        let z = b.iter_at_offset(off + new.chars().count() as i32);
-        b.select_range(&a, &z);
-    }
+    let (s, e) = sel_bounds(b);
+    let full = buffer_source(b);
+    let (new_text, ns, ne) = toggle_wrap(&full, s.offset() as usize, e.offset() as usize, marker);
+    replace_and_select(b, &new_text, ns, ne);
+}
+
+/// Replace the whole buffer with `new_text` and select `[ns, ne)` (char offsets).
+/// `changed` re-runs the WYSIWYG styling.
+fn replace_and_select(b: &gtk::TextBuffer, new_text: &str, ns: usize, ne: usize) {
+    b.set_text(new_text);
+    let a = b.iter_at_offset(ns as i32);
+    let z = b.iter_at_offset(ne as i32);
+    b.select_range(&a, &z);
 }
 
 /// Apply a per-line transform to every line the selection spans.
 fn transform_lines(b: &gtk::TextBuffer, f: impl Fn(&str) -> String) {
     let (s, e) = sel_bounds(b);
-    let (first, last) = (s.line(), e.line());
-    let Some(mut ls) = b.iter_at_line(first) else {
-        return;
-    };
-    let Some(mut le) = b.iter_at_line(last) else {
-        return;
-    };
-    le.forward_to_line_end();
-    let off = ls.offset();
-    let block = b.text(&ls, &le, false).to_string();
-    let new = block.split('\n').map(f).collect::<Vec<_>>().join("\n");
-    b.delete(&mut ls, &mut le);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    let a = b.iter_at_offset(off);
-    let z = b.iter_at_offset(off + new.chars().count() as i32);
-    b.select_range(&a, &z);
+    let full = buffer_source(b);
+    let (new_text, ns, ne) = transform_block(&full, s.offset() as usize, e.offset() as usize, f);
+    replace_and_select(b, &new_text, ns, ne);
 }
 
 /// Insert a fenced code block around the selection.
 fn apply_code_block(b: &gtk::TextBuffer) {
-    let (mut s, mut e) = sel_bounds(b);
-    let off = s.offset();
-    let text = b.text(&s, &e, false).to_string();
-    let new = format!("```\n{text}\n```");
-    b.delete(&mut s, &mut e);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    // Place the cursor on the (possibly empty) content line.
-    let cur = b.iter_at_offset(off + 4 + text.chars().count() as i32);
-    b.place_cursor(&cur);
+    let (s, e) = sel_bounds(b);
+    let full = buffer_source(b);
+    let (new_text, ns, ne) = code_block(&full, s.offset() as usize, e.offset() as usize);
+    replace_and_select(b, &new_text, ns, ne);
 }
 
 /// Insert a Markdown link, selecting the `url` placeholder for quick typing.
 fn apply_link(b: &gtk::TextBuffer) {
-    let (mut s, mut e) = sel_bounds(b);
-    let off = s.offset();
-    let text = b.text(&s, &e, false).to_string();
-    let label = if text.is_empty() { "texte" } else { &text };
-    let new = format!("[{label}](url)");
-    b.delete(&mut s, &mut e);
-    let mut ins = b.iter_at_offset(off);
-    b.insert(&mut ins, &new);
-    // "url" sits after "[label](".
-    let url_start = off + 1 + label.chars().count() as i32 + 2;
-    let a = b.iter_at_offset(url_start);
-    let z = b.iter_at_offset(url_start + 3);
-    b.select_range(&a, &z);
+    let (s, e) = sel_bounds(b);
+    let full = buffer_source(b);
+    let (new_text, ns, ne) = insert_link(&full, s.offset() as usize, e.offset() as usize);
+    replace_and_select(b, &new_text, ns, ne);
 }
 
 /// A formatting toolbar bound to one editor's text view. Buttons return focus
@@ -1564,6 +1905,97 @@ fn open_note(ui: &Ui, state: &Rc<RefCell<State>>, id: &NoteId) {
 }
 
 /// Build an editor pane for `note`, append it as a tab, and wire its auto-save.
+/// A `GtkTextView` that draws list-item markers (bullets, numbers) in the left
+/// gutter. The buffer keeps the raw Markdown (`- `/`N. `); those markers are
+/// hidden by tags and the glyph is painted here, so the source round-trips and
+/// editing/offsets are unaffected. Decoration is off in raw-source mode.
+mod bullet_view {
+    use super::list_markers;
+    use gtk::glib;
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use std::cell::Cell;
+
+    mod imp {
+        use super::*;
+
+        pub struct BulletTextView {
+            pub decorate: Cell<bool>,
+        }
+
+        impl Default for BulletTextView {
+            fn default() -> Self {
+                Self {
+                    decorate: Cell::new(true),
+                }
+            }
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for BulletTextView {
+            const NAME: &'static str = "PnBulletTextView";
+            type Type = super::BulletTextView;
+            type ParentType = gtk::TextView;
+        }
+
+        impl ObjectImpl for BulletTextView {}
+        impl TextViewImpl for BulletTextView {}
+
+        impl WidgetImpl for BulletTextView {
+            fn snapshot(&self, snapshot: &gtk::Snapshot) {
+                self.parent_snapshot(snapshot);
+                if !self.decorate.get() {
+                    return;
+                }
+                let view = self.obj();
+                let buffer = view.buffer();
+                // Include hidden chars: the markers are invisible, but iters count
+                // them, so offsets must be computed over the full source.
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                    .to_string();
+                let color = view.color();
+                for (offset, marker) in list_markers(&text) {
+                    let iter = buffer.iter_at_offset(offset as i32);
+                    let rect = view.iter_location(&iter);
+                    let (wx, wy) = view.buffer_to_window_coords(
+                        gtk::TextWindowType::Widget,
+                        rect.x(),
+                        rect.y(),
+                    );
+                    let layout = view.create_pango_layout(Some(&marker));
+                    let (lw, _) = layout.pixel_size();
+                    // Right-align the glyph in the gutter, just left of the content.
+                    let x = (wx - 8 - lw).max(0);
+                    snapshot.save();
+                    snapshot.translate(&gtk::graphene::Point::new(x as f32, wy as f32));
+                    snapshot.append_layout(&layout, &color);
+                    snapshot.restore();
+                }
+            }
+        }
+    }
+
+    glib::wrapper! {
+        pub struct BulletTextView(ObjectSubclass<imp::BulletTextView>)
+            @extends gtk::TextView, gtk::Widget,
+            @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Scrollable;
+    }
+
+    impl BulletTextView {
+        pub fn new() -> Self {
+            glib::Object::new()
+        }
+
+        /// Toggle gutter drawing (off when showing raw Markdown source).
+        pub fn set_decorate(&self, on: bool) {
+            self.imp().decorate.set(on);
+            self.queue_draw();
+        }
+    }
+}
+use bullet_view::BulletTextView;
+
 fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note) -> Tab {
     let id = note.id.clone();
 
@@ -1590,42 +2022,109 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    let text_view = gtk::TextView::new();
-    text_view.set_monospace(true);
+    let text_view = BulletTextView::new();
+    // WYSIWYG: proportional text; code spans get a monospace tag instead.
+    text_view.set_monospace(false);
     text_view.set_wrap_mode(gtk::WrapMode::WordChar);
     text_view.set_left_margin(18);
     text_view.set_right_margin(18);
     text_view.set_top_margin(10);
     text_view.set_bottom_margin(18);
     let buffer = text_view.buffer();
+    // WYSIWYG tags: style inline content and hide the Markdown markers. A pure
+    // `inline_spans` computes the ranges; the buffer keeps the Markdown source.
+    let tag_bold = gtk::TextTag::builder().weight(700).build();
+    let tag_italic = gtk::TextTag::builder()
+        .style(gtk::pango::Style::Italic)
+        .build();
+    let tag_code = gtk::TextTag::builder().family("monospace").build();
+    let tag_strike = gtk::TextTag::builder().strikethrough(true).build();
+    let tag_hidden = gtk::TextTag::builder().invisible(true).build();
+    let tag_h1 = gtk::TextTag::builder().weight(800).scale(1.6).build();
+    let tag_h2 = gtk::TextTag::builder().weight(800).scale(1.3).build();
+    let tag_h3 = gtk::TextTag::builder().weight(800).scale(1.15).build();
+    // Links: underlined, in the Adwaita accent blue. Quotes: italic + indented.
+    let tag_link = gtk::TextTag::builder()
+        .underline(gtk::pango::Underline::Single)
+        .foreground("#3584e4")
+        .build();
+    let tag_quote = gtk::TextTag::builder()
+        .style(gtk::pango::Style::Italic)
+        .left_margin(24)
+        .build();
+    // Fenced code: monospace and indented so the block reads apart from prose.
+    let tag_code_block = gtk::TextTag::builder()
+        .family("monospace")
+        .left_margin(24)
+        .build();
+    // List items: indent the paragraph, leaving a gutter for the drawn marker.
+    let tag_list = gtk::TextTag::builder().left_margin(44).build();
+    let all_tags = [
+        &tag_bold,
+        &tag_italic,
+        &tag_code,
+        &tag_strike,
+        &tag_hidden,
+        &tag_h1,
+        &tag_h2,
+        &tag_h3,
+        &tag_link,
+        &tag_quote,
+        &tag_code_block,
+        &tag_list,
+    ];
+    for t in all_tags {
+        buffer.tag_table().add(t);
+    }
+    // When on, show the raw Markdown (no tags); otherwise the styled WYSIWYG view.
+    let source_mode = std::rc::Rc::new(std::cell::Cell::new(false));
+    let restyle: std::rc::Rc<dyn Fn()> = std::rc::Rc::new({
+        let buffer = buffer.clone();
+        let source_mode = source_mode.clone();
+        let tags: Vec<gtk::TextTag> = all_tags.iter().map(|t| (*t).clone()).collect();
+        move || {
+            let start = buffer.start_iter();
+            let end = buffer.end_iter();
+            for t in &tags {
+                buffer.remove_tag(t, &start, &end);
+            }
+            if source_mode.get() {
+                return; // source mode: leave the Markdown markers visible
+            }
+            let text = buffer.text(&start, &end, false).to_string();
+            for s in spans(&text) {
+                let a = buffer.iter_at_offset(s.start as i32);
+                let b = buffer.iter_at_offset(s.end as i32);
+                let idx = match s.kind {
+                    SpanKind::Bold => 0,
+                    SpanKind::Italic => 1,
+                    SpanKind::Code => 2,
+                    SpanKind::Strike => 3,
+                    SpanKind::Hidden => 4,
+                    SpanKind::H1 => 5,
+                    SpanKind::H2 => 6,
+                    SpanKind::H3 => 7,
+                    SpanKind::Link => 8,
+                    SpanKind::Quote => 9,
+                    SpanKind::CodeBlock => 10,
+                    SpanKind::ListItem => 11,
+                };
+                buffer.apply_tag(&tags[idx], &a, &b);
+            }
+        }
+    });
     let text_scroll = gtk::ScrolledWindow::builder()
         .child(&text_view)
         .vexpand(true)
         .build();
 
-    // Edit / preview stack: the raw editor, or a rendered Markdown view.
-    let preview_label = gtk::Label::new(None);
-    preview_label.set_wrap(true);
-    preview_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    preview_label.set_xalign(0.0);
-    preview_label.set_yalign(0.0);
-    preview_label.set_selectable(true);
-    preview_label.set_margin_start(18);
-    preview_label.set_margin_end(18);
-    preview_label.set_margin_top(10);
-    preview_label.set_margin_bottom(18);
-    let preview_scroll = gtk::ScrolledWindow::builder()
-        .child(&preview_label)
-        .vexpand(true)
-        .build();
-    let stack = gtk::Stack::new();
-    stack.set_vexpand(true);
-    stack.add_named(&text_scroll, Some("edit"));
-    stack.add_named(&preview_scroll, Some("preview"));
-
-    // Footer: preview toggle on the left, live word/character count on the right.
-    let preview_toggle = gtk::ToggleButton::with_label("Aperçu");
-    preview_toggle.add_css_class("flat");
+    // Footer: source toggle on the left, live word/character count on the right.
+    let source_toggle = gtk::ToggleButton::with_label("Source");
+    source_toggle.set_tooltip_text(Some("Afficher le Markdown brut"));
+    source_toggle.add_css_class("flat");
+    let history_btn = gtk::Button::from_icon_name("document-open-recent-symbolic");
+    history_btn.set_tooltip_text(Some("Historique des versions"));
+    history_btn.add_css_class("flat");
     let count_label = gtk::Label::new(None);
     count_label.add_css_class("dim-label");
     count_label.add_css_class("caption");
@@ -1636,8 +2135,19 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     footer.set_margin_end(18);
     footer.set_margin_top(4);
     footer.set_margin_bottom(6);
-    footer.append(&preview_toggle);
+    footer.append(&source_toggle);
+    footer.append(&history_btn);
     footer.append(&count_label);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        history_btn.connect_clicked(move |btn| {
+            open_history_dialog(btn, &ui, &state, &id, &buffer, &title);
+        });
+    }
 
     // Attachments row: one chip per attachment + an "add" button. The button is
     // only sensitive when the device is enrolled (attach needs the relay).
@@ -1661,31 +2171,26 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         .vscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    let toolbar = format_toolbar(&text_view);
+    let toolbar = format_toolbar(text_view.upcast_ref::<gtk::TextView>());
 
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor.append(&title);
     editor.append(&tags_scroll);
     editor.append(&atts_scroll);
     editor.append(&toolbar);
-    editor.append(&stack);
+    editor.append(&text_scroll);
     editor.append(&footer);
 
-    // Toggle between editing and a rendered Markdown preview.
+    // Toggle raw Markdown (source) vs the styled WYSIWYG view.
     {
-        let buffer = buffer.clone();
-        let stack = stack.clone();
-        let preview_label = preview_label.clone();
-        preview_toggle.connect_toggled(move |btn| {
-            if btn.is_active() {
-                let text = buffer
-                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                    .to_string();
-                preview_label.set_markup(&md_to_pango(&text));
-                stack.set_visible_child_name("preview");
-            } else {
-                stack.set_visible_child_name("edit");
-            }
+        let source_mode = source_mode.clone();
+        let restyle = restyle.clone();
+        let text_view = text_view.clone();
+        source_toggle.connect_toggled(move |btn| {
+            let raw = btn.is_active();
+            source_mode.set(raw);
+            text_view.set_decorate(!raw); // no gutter glyphs over raw markers
+            restyle();
         });
     }
 
@@ -1694,6 +2199,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     title.set_text(&note.title);
     buffer.set_text(&note.text);
     count_label.set_text(&count_text(&note.text));
+    restyle(); // initial WYSIWYG styling of the seeded text
 
     let page = ui.tab_view.append(&editor);
     page.set_title(note_title(&note.title));
@@ -1702,11 +2208,43 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     {
         let count_label = count_label.clone();
         buffer.connect_changed(move |buf| {
-            let text = buf
-                .text(&buf.start_iter(), &buf.end_iter(), false)
-                .to_string();
-            count_label.set_text(&count_text(&text));
+            count_label.set_text(&count_text(&buffer_source(buf)));
         });
+    }
+
+    // Re-apply WYSIWYG styling on every edit.
+    {
+        let restyle = restyle.clone();
+        buffer.connect_changed(move |_| restyle());
+    }
+
+    // Follow links on Ctrl+click (plain clicks stay cursor placement, since the
+    // view is editable). The link URL lives in the Markdown source at the offset.
+    {
+        let tv = text_view.clone();
+        let buffer = buffer.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
+        gesture.connect_released(move |g, _n, x, y| {
+            if !g
+                .current_event_state()
+                .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            {
+                return;
+            }
+            let (bx, by) =
+                tv.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            if let Some(iter) = tv.iter_at_location(bx, by) {
+                let text = buffer_source(&buffer);
+                if let Some(url) = link_at(&text, iter.offset() as usize) {
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                        &url,
+                        None::<&gtk::gio::AppLaunchContext>,
+                    );
+                }
+            }
+        });
+        text_view.add_controller(gesture);
     }
 
     // Title edits -> save + update tab, sidebar row and (if active) the header.
@@ -1741,9 +2279,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
             if state.borrow().loading {
                 return;
             }
-            let text = buf
-                .text(&buf.start_iter(), &buf.end_iter(), false)
-                .to_string();
+            let text = buffer_source(buf);
             let mut st = state.borrow_mut();
             let _ = st.doc.replace_text(&id, &text, store::now_millis());
             st.persist();
@@ -1795,7 +2331,7 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
         id: id.clone(),
         page,
         title,
-        text_view,
+        text_view: text_view.upcast(),
         buffer,
         tags_box: tags_box.clone(),
         atts_box: atts_box.clone(),
@@ -2097,6 +2633,592 @@ fn start_auto_sync(ui: &Ui, state: &Rc<RefCell<State>>, label: &gtk::Label) {
     });
 }
 
+/// Run an async `remote` call on a worker runtime, delivering the result to
+/// `on_done` back on the GTK main loop.
+fn spawn_remote<T: Send + 'static>(
+    fut: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+    on_done: impl Fn(Result<T, String>) + 'static,
+) {
+    let (tx, rx) = async_channel::bounded::<Result<T, String>>(1);
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send_blocking(Err(e.to_string()));
+                return;
+            }
+        };
+        let _ = tx.send_blocking(rt.block_on(fut));
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(r) = rx.recv().await {
+            on_done(r);
+        }
+    });
+}
+
+fn section_title(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.set_halign(gtk::Align::Start);
+    l.add_css_class("heading");
+    l.set_margin_top(6);
+    l
+}
+
+/// Sync onboarding + device management: create a group, join one, or list and
+/// revoke devices. Writes the same `config.json` the CLI would — elsewhere the
+/// GUI only reads it.
+fn open_sync_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    sync_label: &gtk::Label,
+) {
+    let window = anchor.root().and_downcast::<gtk::Window>();
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Synchronisation");
+    dialog.set_content_width(440);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    body.set_margin_top(18);
+    body.set_margin_bottom(18);
+    body.set_margin_start(18);
+    body.set_margin_end(18);
+
+    let header = adw::HeaderBar::new();
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&header);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&body)
+        .propagate_natural_height(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    tv.set_content(Some(&scroll));
+    dialog.set_child(Some(&tv));
+
+    match config::Settings::load_from(&config::config_path()).ok() {
+        Some(settings) => build_enrolled_body(&body, &settings),
+        None => build_unenrolled_body(&body, ui, state, sync_label, &dialog),
+    }
+
+    dialog.present(window.as_ref());
+}
+
+/// Not-enrolled view: join an existing group (paste blob) or create a new one.
+fn build_unenrolled_body(
+    body: &gtk::Box,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    sync_label: &gtk::Label,
+    dialog: &adw::Dialog,
+) {
+    let intro = gtk::Label::new(Some("Cet appareil n'est pas synchronisé."));
+    intro.set_halign(gtk::Align::Start);
+    intro.set_wrap(true);
+    body.append(&intro);
+
+    // --- Join an existing group ---
+    body.append(&section_title("Rejoindre un groupe"));
+    let blob_entry = gtk::Entry::new();
+    blob_entry.set_placeholder_text(Some("Coller le code d'appairage"));
+    blob_entry.set_hexpand(true);
+    body.append(&blob_entry);
+    let join_btn = gtk::Button::with_label("Rejoindre");
+    join_btn.add_css_class("suggested-action");
+    join_btn.set_halign(gtk::Align::End);
+    body.append(&join_btn);
+    let join_status = gtk::Label::new(None);
+    join_status.set_halign(gtk::Align::Start);
+    join_status.add_css_class("dim-label");
+    body.append(&join_status);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sync_label = sync_label.clone();
+        let dialog = dialog.clone();
+        let blob_entry = blob_entry.clone();
+        let join_status = join_status.clone();
+        join_btn.connect_clicked(move |btn| {
+            let blob = blob_entry.text().trim().to_string();
+            if blob.is_empty() {
+                join_status.set_text("Code d'appairage requis.");
+                return;
+            }
+            btn.set_sensitive(false);
+            join_status.set_text("Appairage…");
+            let cfg = config::config_path();
+            let ui = ui.clone();
+            let state = state.clone();
+            let sync_label = sync_label.clone();
+            let dialog = dialog.clone();
+            let btn = btn.clone();
+            let join_status = join_status.clone();
+            spawn_remote(
+                async move { remote::pair(&cfg, &blob).await.map_err(|e| e.to_string()) },
+                move |res| match res {
+                    Ok(()) => {
+                        start_auto_sync(&ui, &state, &sync_label);
+                        dialog.close();
+                    }
+                    Err(e) => {
+                        btn.set_sensitive(true);
+                        join_status.set_text(&format!("Échec : {e}"));
+                    }
+                },
+            );
+        });
+    }
+
+    // --- Create a new group (this device becomes admin) ---
+    body.append(&section_title("Créer un groupe"));
+    let relay_entry = gtk::Entry::new();
+    relay_entry.set_placeholder_text(Some("URL du relais (ex. https://relay.example.org)"));
+    body.append(&relay_entry);
+    let admin_entry = gtk::Entry::new();
+    admin_entry.set_visibility(false);
+    admin_entry.set_placeholder_text(Some("Jeton admin"));
+    body.append(&admin_entry);
+    let create_btn = gtk::Button::with_label("Créer le groupe");
+    create_btn.add_css_class("suggested-action");
+    create_btn.set_halign(gtk::Align::End);
+    body.append(&create_btn);
+    let create_status = gtk::Label::new(None);
+    create_status.set_halign(gtk::Align::Start);
+    create_status.add_css_class("dim-label");
+    body.append(&create_status);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let sync_label = sync_label.clone();
+        let body = body.clone();
+        let relay_entry = relay_entry.clone();
+        let admin_entry = admin_entry.clone();
+        let create_status = create_status.clone();
+        create_btn.connect_clicked(move |btn| {
+            let relay = relay_entry.text().trim().to_string();
+            let admin = admin_entry.text().trim().to_string();
+            if relay.is_empty() || admin.is_empty() {
+                create_status.set_text("URL du relais et jeton admin requis.");
+                return;
+            }
+            btn.set_sensitive(false);
+            create_status.set_text("Création…");
+            let cfg = config::config_path();
+            let ui = ui.clone();
+            let state = state.clone();
+            let sync_label = sync_label.clone();
+            let body = body.clone();
+            let btn = btn.clone();
+            let create_status = create_status.clone();
+            spawn_remote(
+                async move {
+                    remote::init(&cfg, &relay, &admin)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |res| match res {
+                    Ok(blob) => {
+                        start_auto_sync(&ui, &state, &sync_label);
+                        show_pairing_blob(&body, &blob);
+                    }
+                    Err(e) => {
+                        btn.set_sensitive(true);
+                        create_status.set_text(&format!("Échec : {e}"));
+                    }
+                },
+            );
+        });
+    }
+}
+
+/// Replace the dialog body with the freshly-minted pairing blob: a QR to scan
+/// from another device, plus the raw text to copy.
+fn show_pairing_blob(body: &gtk::Box, blob: &str) {
+    while let Some(child) = body.first_child() {
+        body.remove(&child);
+    }
+    let intro = gtk::Label::new(Some(
+        "Groupe créé. Scannez ce code depuis l'autre appareil, ou copiez le texte.",
+    ));
+    intro.set_halign(gtk::Align::Start);
+    intro.set_wrap(true);
+    body.append(&intro);
+
+    if let Ok((rgba, side)) = qr_rgba(blob, 6) {
+        let bytes = glib::Bytes::from_owned(rgba);
+        let texture = gtk::gdk::MemoryTexture::new(
+            side as i32,
+            side as i32,
+            gtk::gdk::MemoryFormat::R8g8b8a8,
+            &bytes,
+            side * 4,
+        );
+        let pic = gtk::Picture::for_paintable(&texture);
+        pic.set_size_request(side as i32, side as i32);
+        pic.set_halign(gtk::Align::Center);
+        pic.set_margin_top(6);
+        pic.set_margin_bottom(6);
+        body.append(&pic);
+    }
+
+    let entry = gtk::Entry::new();
+    entry.set_text(blob);
+    entry.set_editable(false);
+    entry.set_hexpand(true);
+    body.append(&entry);
+    let copy = gtk::Button::with_label("Copier le code");
+    copy.set_halign(gtk::Align::End);
+    {
+        let blob = blob.to_string();
+        copy.connect_clicked(move |btn| {
+            btn.clipboard().set_text(&blob);
+            btn.set_label("Copié");
+        });
+    }
+    body.append(&copy);
+}
+
+/// Enrolled view: sync status plus admin device management (list + revoke).
+fn build_enrolled_body(body: &gtk::Box, settings: &config::Settings) {
+    let status = gtk::Label::new(Some("Cet appareil est synchronisé."));
+    status.set_halign(gtk::Align::Start);
+    body.append(&status);
+    for line in [
+        format!("Relais : {}", settings.relay_url),
+        format!("Groupe : {}", settings.group_id),
+    ] {
+        let l = gtk::Label::new(Some(&line));
+        l.set_halign(gtk::Align::Start);
+        l.set_wrap(true);
+        l.set_selectable(true);
+        l.add_css_class("dim-label");
+        body.append(&l);
+    }
+
+    body.append(&section_title("Gérer les appareils"));
+    let admin_entry = gtk::Entry::new();
+    admin_entry.set_visibility(false);
+    admin_entry.set_placeholder_text(Some("Jeton admin"));
+    body.append(&admin_entry);
+    let list_btn = gtk::Button::with_label("Lister les appareils");
+    list_btn.set_halign(gtk::Align::End);
+    body.append(&list_btn);
+    let dev_list = gtk::ListBox::new();
+    dev_list.set_selection_mode(gtk::SelectionMode::None);
+    dev_list.add_css_class("boxed-list");
+    dev_list.set_margin_top(6);
+    body.append(&dev_list);
+    let dev_status = gtk::Label::new(None);
+    dev_status.set_halign(gtk::Align::Start);
+    dev_status.add_css_class("dim-label");
+    body.append(&dev_status);
+
+    // `refresh` re-fetches the device list; revoke buttons call it again, so it
+    // is held indirectly (an Rc cell) to allow the self-reference.
+    type Refresh = Rc<dyn Fn()>;
+    let holder: Rc<RefCell<Option<Refresh>>> = Rc::new(RefCell::new(None));
+    let refresh: Refresh = Rc::new({
+        let admin_entry = admin_entry.clone();
+        let dev_list = dev_list.clone();
+        let dev_status = dev_status.clone();
+        let holder = holder.clone();
+        move || {
+            let admin = admin_entry.text().trim().to_string();
+            if admin.is_empty() {
+                dev_status.set_text("Jeton admin requis.");
+                return;
+            }
+            while let Some(child) = dev_list.first_child() {
+                dev_list.remove(&child);
+            }
+            dev_status.set_text("Chargement…");
+            let cfg = config::config_path();
+            let dev_list = dev_list.clone();
+            let dev_status = dev_status.clone();
+            let holder = holder.clone();
+            let admin_for_rows = admin.clone();
+            spawn_remote(
+                async move {
+                    remote::devices(&cfg, &admin)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |res| match res {
+                    Ok(devices) => {
+                        dev_status.set_text("");
+                        for (id, active) in &devices {
+                            let row = adw::ActionRow::new();
+                            row.set_title(id);
+                            row.set_subtitle(if *active { "actif" } else { "révoqué" });
+                            if *active {
+                                let rb = gtk::Button::with_label("Révoquer");
+                                rb.add_css_class("destructive-action");
+                                rb.set_valign(gtk::Align::Center);
+                                let id = id.clone();
+                                let admin = admin_for_rows.clone();
+                                let holder = holder.clone();
+                                let dev_status = dev_status.clone();
+                                rb.connect_clicked(move |b| {
+                                    b.set_sensitive(false);
+                                    let cfg = config::config_path();
+                                    let id = id.clone();
+                                    let admin = admin.clone();
+                                    let holder = holder.clone();
+                                    let dev_status = dev_status.clone();
+                                    spawn_remote(
+                                        async move {
+                                            remote::revoke(&cfg, &admin, &id)
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        },
+                                        move |r| match r {
+                                            Ok(()) => {
+                                                if let Some(f) = holder.borrow().as_ref() {
+                                                    f();
+                                                }
+                                            }
+                                            Err(e) => dev_status.set_text(&format!("Échec : {e}")),
+                                        },
+                                    );
+                                });
+                                row.add_suffix(&rb);
+                            }
+                            dev_list.append(&row);
+                        }
+                        if devices.is_empty() {
+                            dev_status.set_text("Aucun appareil.");
+                        }
+                    }
+                    Err(e) => dev_status.set_text(&format!("Échec : {e}")),
+                },
+            );
+        }
+    });
+    *holder.borrow_mut() = Some(refresh.clone());
+    list_btn.connect_clicked(move |_| refresh());
+}
+
+/// Held reference to the history timeline's repaint closure, so a preview's
+/// "Back" can call it (self-reference through an `Rc` cell).
+type HistoryBack = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+/// Format a unix-millis timestamp as a local, human date for the history list.
+fn format_ts(ts: i64) -> String {
+    if let Ok(dt) = gtk::glib::DateTime::from_unix_local(ts / 1000)
+        && let Ok(s) = dt.format("%e %b %Y, %H:%M")
+    {
+        return s.to_string();
+    }
+    ts.to_string()
+}
+
+/// Per-note version history: a timeline, a read-only preview of any version, and
+/// restore. Reads are local (`commands::history`/`note_at`); restore is a
+/// forward edit that then refreshes the open editor. See docs/design/note-history.md.
+fn open_history_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    buffer: &gtk::TextBuffer,
+    title: &gtk::Entry,
+) {
+    let window = anchor.root().and_downcast::<gtk::Window>();
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Historique");
+    dialog.set_content_width(460);
+    dialog.set_content_height(560);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    let header = adw::HeaderBar::new();
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&header);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&body)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    tv.set_content(Some(&scroll));
+    dialog.set_child(Some(&tv));
+
+    let versions = commands::history(&state.borrow().store, id.as_str()).unwrap_or_default();
+
+    // `render_list` repaints the timeline; a preview's "Back" calls it again, so
+    // it is held indirectly to allow the self-reference.
+    type Render = Rc<dyn Fn()>;
+    let holder: Rc<RefCell<Option<Render>>> = Rc::new(RefCell::new(None));
+    let render_list: Render = Rc::new({
+        let body = body.clone();
+        let dialog = dialog.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        let holder = holder.clone();
+        move || {
+            while let Some(c) = body.first_child() {
+                body.remove(&c);
+            }
+            if versions.is_empty() {
+                let l = gtk::Label::new(Some("Aucune version antérieure."));
+                l.add_css_class("dim-label");
+                l.set_margin_top(24);
+                body.append(&l);
+                return;
+            }
+            let list = gtk::ListBox::new();
+            list.set_selection_mode(gtk::SelectionMode::None);
+            list.add_css_class("boxed-list");
+            for (i, v) in versions.iter().enumerate() {
+                let row = adw::ActionRow::new();
+                row.set_title(&format_ts(v.timestamp));
+                row.set_activatable(true);
+                if i == 0 {
+                    let chip = gtk::Label::new(Some("Actuel"));
+                    chip.add_css_class("accent");
+                    chip.add_css_class("caption-heading");
+                    chip.set_valign(gtk::Align::Center);
+                    row.add_suffix(&chip);
+                } else {
+                    let arrow = gtk::Image::from_icon_name("go-next-symbolic");
+                    row.add_suffix(&arrow);
+                }
+                let version_id = v.version_id.clone();
+                let body = body.clone();
+                let dialog = dialog.clone();
+                let ui = ui.clone();
+                let state = state.clone();
+                let id = id.clone();
+                let buffer = buffer.clone();
+                let title = title.clone();
+                let holder = holder.clone();
+                row.connect_activated(move |_| {
+                    history_preview(
+                        &body,
+                        &dialog,
+                        &ui,
+                        &state,
+                        &id,
+                        &buffer,
+                        &title,
+                        &version_id,
+                        &holder,
+                    );
+                });
+                list.append(&row);
+            }
+            body.append(&list);
+        }
+    });
+    *holder.borrow_mut() = Some(render_list.clone());
+    render_list();
+    dialog.present(window.as_ref());
+}
+
+/// A read-only preview of one version, with Restore and Back.
+#[allow(clippy::too_many_arguments)]
+fn history_preview(
+    body: &gtk::Box,
+    dialog: &adw::Dialog,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    buffer: &gtk::TextBuffer,
+    title: &gtk::Entry,
+    version_id: &str,
+    back: &HistoryBack,
+) {
+    let Ok(snapshot) = commands::note_at(&state.borrow().store, id.as_str(), version_id) else {
+        if let Some(f) = back.borrow().as_ref() {
+            f();
+        }
+        return;
+    };
+    while let Some(c) = body.first_child() {
+        body.remove(&c);
+    }
+    let banner = gtk::Label::new(Some(
+        "Version en lecture seule — le texte actuel n'est pas modifié.",
+    ));
+    banner.add_css_class("dim-label");
+    banner.set_halign(gtk::Align::Start);
+    banner.set_wrap(true);
+    body.append(&banner);
+
+    let preview = gtk::TextView::new();
+    preview.set_editable(false);
+    preview.set_cursor_visible(false);
+    preview.set_wrap_mode(gtk::WrapMode::WordChar);
+    preview.set_left_margin(8);
+    preview.set_right_margin(8);
+    preview.set_top_margin(8);
+    let heading = if snapshot.title.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", snapshot.title)
+    };
+    preview
+        .buffer()
+        .set_text(&format!("{heading}{}", snapshot.text));
+    let sw = gtk::ScrolledWindow::builder()
+        .child(&preview)
+        .vexpand(true)
+        .build();
+    body.append(&sw);
+
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    bar.set_halign(gtk::Align::End);
+    let back_btn = gtk::Button::with_label("Retour");
+    {
+        let back = back.clone();
+        back_btn.connect_clicked(move |_| {
+            if let Some(f) = back.borrow().as_ref() {
+                f();
+            }
+        });
+    }
+    let restore_btn = gtk::Button::with_label("Restaurer cette version");
+    restore_btn.add_css_class("suggested-action");
+    {
+        let dialog = dialog.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        let version_id = version_id.to_string();
+        restore_btn.connect_clicked(move |_| {
+            let now = store::now_millis();
+            if commands::restore_version(&state.borrow().store, now, id.as_str(), &version_id)
+                .is_err()
+            {
+                return;
+            }
+            // Refresh the open editor from the restored note without re-saving.
+            if let Ok(note) = commands::get(&state.borrow().store, id.as_str()) {
+                state.borrow_mut().loading = true;
+                title.set_text(&note.title);
+                buffer.set_text(&note.text);
+                state.borrow_mut().loading = false;
+            }
+            reload_from_disk(&state);
+            rebuild_tree(&ui, &state);
+            dialog.close();
+        });
+    }
+    bar.append(&back_btn);
+    bar.append(&restore_btn);
+    body.append(&bar);
+}
+
 fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
     let Ok(doc) = state.borrow().store.load() else {
         return;
@@ -2127,10 +3249,7 @@ fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
             continue;
         }
         let cur_title = tab.title.text().to_string();
-        let cur_body = tab
-            .buffer
-            .text(&tab.buffer.start_iter(), &tab.buffer.end_iter(), false)
-            .to_string();
+        let cur_body = buffer_source(&tab.buffer);
         if cur_title != note.title || cur_body != note.text {
             state.borrow_mut().loading = true;
             if cur_title != note.title {
@@ -2203,10 +3322,362 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::{
-        count_text, md_to_pango, parse_expanded, serialize_expanded, set_heading_line,
-        subtree_note_count, toggle_line_prefix, wrap_or_unwrap,
+        Span, SpanKind, code_block, count_text, heading_level_of, heading_prefix, inline_spans,
+        insert_link, link_at, parse_expanded, serialize_expanded, set_heading_line, spans,
+        subtree_note_count, toggle_line_prefix, toggle_wrap, transform_block,
     };
     use std::collections::HashSet;
+
+    fn span(start: usize, end: usize, kind: SpanKind) -> Span {
+        Span { start, end, kind }
+    }
+
+    #[test]
+    fn inline_spans_hides_markers_and_styles_content() {
+        use SpanKind::*;
+        assert_eq!(
+            inline_spans("un **gras** ici"),
+            vec![span(3, 5, Hidden), span(5, 9, Bold), span(9, 11, Hidden)],
+        );
+        assert_eq!(
+            inline_spans("a *i* `c`"),
+            vec![
+                span(2, 3, Hidden),
+                span(3, 4, Italic),
+                span(4, 5, Hidden),
+                span(6, 7, Hidden),
+                span(7, 8, Code),
+                span(8, 9, Hidden),
+            ],
+        );
+        assert_eq!(
+            inline_spans("~~x~~"),
+            vec![span(0, 2, Hidden), span(2, 3, Strike), span(3, 5, Hidden)],
+        );
+    }
+
+    #[test]
+    fn inline_spans_stacks_bold_italic() {
+        use SpanKind::*;
+        assert_eq!(
+            inline_spans("***x***"),
+            vec![
+                span(0, 3, Hidden),
+                span(3, 4, Bold),
+                span(3, 4, Italic),
+                span(4, 7, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn inline_spans_leaves_unterminated_literal() {
+        assert_eq!(inline_spans("un **gras"), vec![]);
+        assert_eq!(inline_spans("a * b"), vec![]);
+    }
+
+    #[test]
+    fn inline_spans_hides_link_syntax_and_styles_label() {
+        use SpanKind::*;
+        // "voir [la doc](u)": hide "[", style "la doc", hide "](u)".
+        assert_eq!(
+            inline_spans("voir [la doc](u)"),
+            vec![span(5, 6, Hidden), span(6, 12, Link), span(12, 16, Hidden)],
+        );
+    }
+
+    #[test]
+    fn inline_spans_keeps_marks_inside_link_label() {
+        use SpanKind::*;
+        // "[**b**](u)": label styled as a link, with its inner bold still parsed.
+        assert_eq!(
+            inline_spans("[**b**](u)"),
+            vec![
+                span(0, 1, Hidden),
+                span(1, 6, Link),
+                span(1, 3, Hidden),
+                span(3, 4, Bold),
+                span(4, 6, Hidden),
+                span(6, 10, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn inline_spans_leaves_malformed_link_literal() {
+        // No "()" after the "]", or an empty label: nothing is hidden.
+        assert_eq!(inline_spans("[x] sans"), vec![]);
+        assert_eq!(inline_spans("[](u)"), vec![]);
+    }
+
+    #[test]
+    fn spans_hides_quote_prefix_and_styles_content() {
+        use SpanKind::*;
+        // "> cité": hide "> ", style the rest as a quote, inline marks still apply.
+        assert_eq!(
+            spans("> cité **fort**"),
+            vec![
+                span(0, 2, Hidden),
+                span(0, 15, Quote),
+                span(7, 9, Hidden),
+                span(9, 13, Bold),
+                span(13, 15, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn spans_hides_code_fences_and_marks_content() {
+        use SpanKind::*;
+        // "```\ncode\n```": fences hidden, the line between kept as CodeBlock.
+        assert_eq!(
+            spans("```\ncode\n```"),
+            vec![
+                span(0, 3, Hidden),
+                span(4, 8, CodeBlock),
+                span(9, 12, Hidden)
+            ],
+        );
+        // A language spec on the opening fence is hidden with it.
+        assert_eq!(
+            spans("```rust\nx\n```"),
+            vec![
+                span(0, 7, Hidden),
+                span(8, 9, CodeBlock),
+                span(10, 13, Hidden)
+            ],
+        );
+    }
+
+    #[test]
+    fn spans_code_block_suppresses_inline_and_headings() {
+        use SpanKind::*;
+        // Inside a fence, `#`/`**` are verbatim: no heading or bold spans.
+        assert_eq!(
+            spans("```\n# not a heading **x**\n```"),
+            vec![
+                span(0, 3, Hidden),
+                span(4, 25, CodeBlock),
+                span(26, 29, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn link_at_returns_url_when_offset_is_in_the_label() {
+        // "voir [la doc](https://x) fin": label chars are 6..12.
+        let t = "voir [la doc](https://x) fin";
+        assert_eq!(link_at(t, 6), Some("https://x".to_string()));
+        assert_eq!(link_at(t, 11), Some("https://x".to_string()));
+        // Outside the label (the `[`, the hidden url, plain text) → nothing.
+        assert_eq!(link_at(t, 5), None); // on the `[`
+        assert_eq!(link_at(t, 0), None); // in "voir"
+        assert_eq!(link_at(t, 26), None); // in " fin"
+    }
+
+    #[test]
+    fn link_at_uses_the_right_line_and_skips_code_blocks() {
+        // Second line holds the link; offset is absolute across lines.
+        let t = "intro\nvoir [doc](u) ici";
+        assert_eq!(link_at(t, 12), Some("u".to_string())); // "doc" label
+        // A link inside a fenced block is verbatim, not clickable.
+        let c = "```\n[doc](u)\n```";
+        assert_eq!(link_at(c, 6), None);
+    }
+
+    #[test]
+    fn line_list_marker_detects_bullets_and_numbers() {
+        use super::line_list_marker;
+        assert_eq!(line_list_marker("- a"), Some((2, "•".to_string())));
+        assert_eq!(line_list_marker("* a"), Some((2, "•".to_string())));
+        assert_eq!(line_list_marker("+ a"), Some((2, "•".to_string())));
+        assert_eq!(line_list_marker("3. b"), Some((3, "3.".to_string())));
+        assert_eq!(line_list_marker("12. b"), Some((4, "12.".to_string())));
+        // No space, wrong punctuation, or plain text → not a list.
+        assert_eq!(line_list_marker("-a"), None);
+        assert_eq!(line_list_marker("1.b"), None);
+        assert_eq!(line_list_marker("1) b"), None);
+        assert_eq!(line_list_marker("word"), None);
+    }
+
+    #[test]
+    fn list_markers_uses_offsets_and_skips_code_blocks() {
+        use super::list_markers;
+        // A bullet on line 0, an ordered item on line 4; the fenced `- b` is
+        // verbatim and yields no marker. Offsets are each line's start.
+        let t = "- a\n```\n- b\n```\n2. c";
+        assert_eq!(
+            list_markers(t),
+            vec![(0, "•".to_string()), (16, "2.".to_string())],
+        );
+    }
+
+    #[test]
+    fn spans_hides_list_markers_and_indents() {
+        use SpanKind::*;
+        assert_eq!(
+            spans("- foo"),
+            vec![span(0, 2, Hidden), span(0, 5, ListItem)]
+        );
+        assert_eq!(
+            spans("2. x"),
+            vec![span(0, 3, Hidden), span(0, 4, ListItem)]
+        );
+    }
+
+    #[test]
+    fn content_sig_is_stable_and_detects_changes() {
+        // Guards the reload-diff: `maybe_reload` overwrites the buffer only when
+        // the signature changes, so it must be stable when nothing changed and
+        // differ on title/folder edits. Pure (no GTK), runs headless.
+        use note_core::{NoteStore, ROOT_FOLDER};
+        let mut d = NoteStore::new();
+        let id = d.create_note(1).unwrap();
+        d.set_title(&id, "One", 1).unwrap();
+        let sig = super::content_sig(&d);
+        assert_eq!(sig, super::content_sig(&d), "stable when unchanged");
+        d.set_title(&id, "Two", 2).unwrap();
+        assert_ne!(sig, super::content_sig(&d), "title edit detected");
+        let sig2 = super::content_sig(&d);
+        let f = d.create_folder("F", ROOT_FOLDER, 3).unwrap();
+        d.move_note(&id, f.as_str(), 3).unwrap();
+        assert_ne!(sig2, super::content_sig(&d), "folder move detected");
+    }
+
+    /// All GTK-widget tests live in ONE `#[test]`: GTK is single-threaded per
+    /// process, and `cargo test` spreads separate tests across worker threads, so
+    /// a second `gtk::init()` on another thread fails. Running everything on one
+    /// thread after a single init is the only harness that survives the parallel
+    /// runner (and CI). Needs a display — xvfb in CI, with PN_REQUIRE_GTK set so a
+    /// missing display fails loudly instead of skipping.
+    #[test]
+    fn gtk_editor_glue() {
+        use gtk::prelude::*;
+        use note_core::NoteStore;
+        if gtk::init().is_err() {
+            assert!(
+                std::env::var_os("PN_REQUIRE_GTK").is_none(),
+                "PN_REQUIRE_GTK is set but gtk::init() failed (no display?)"
+            );
+            return;
+        }
+
+        // --- #154 unit: a hidden marker is dropped by the raw read but kept by
+        // buffer_source ---
+        let b = gtk::TextBuffer::new(None);
+        b.set_text("**bold**");
+        let hide = gtk::TextTag::builder().invisible(true).build();
+        b.tag_table().add(&hide);
+        b.apply_tag(&hide, &b.iter_at_offset(0), &b.iter_at_offset(2));
+        let stripped = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+        assert_eq!(stripped, "bold**");
+        assert_eq!(super::buffer_source(&b), "**bold**");
+
+        // --- integration: hide every marker like `restyle`, then confirm the
+        // save path preserves the full source across every construct ---
+        let source = "# Titre\nUn **gras**, de l'*ital*, du `code`, du ~~barré~~.\n\
+             Voir [lien](https://exemple.org).\n> une citation\n- puce une\n\
+             - puce deux\n1. étape une\n```rust\nlet x = 1;\n```";
+        let buffer = gtk::TextBuffer::new(None);
+        buffer.set_text(source);
+        let hide2 = gtk::TextTag::builder().invisible(true).build();
+        buffer.tag_table().add(&hide2);
+        for s in super::spans(source) {
+            if s.kind == super::SpanKind::Hidden {
+                buffer.apply_tag(
+                    &hide2,
+                    &buffer.iter_at_offset(s.start as i32),
+                    &buffer.iter_at_offset(s.end as i32),
+                );
+            }
+        }
+        let visible = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string();
+        assert!(
+            !visible.contains("**") && !visible.contains("```") && !visible.contains("~~"),
+            "markers are hidden from the visible text: {visible:?}"
+        );
+        assert_eq!(super::buffer_source(&buffer), source);
+        let mut store = NoteStore::new();
+        let id = store.create_note(1).unwrap();
+        store
+            .replace_text(&id, &super::buffer_source(&buffer), 1)
+            .unwrap();
+        assert_eq!(store.get_note(&id).unwrap().unwrap().text, source);
+
+        // --- integration: the toolbar bold/unbold cycle through a real selection
+        // (sel_bounds + toggle_wrap + replace_and_select) ---
+        let t = gtk::TextBuffer::new(None);
+        t.set_text("un mot ici");
+        t.select_range(&t.iter_at_offset(3), &t.iter_at_offset(6)); // "mot"
+        super::apply_wrap(&t, "**");
+        assert_eq!(super::buffer_source(&t), "un **mot** ici");
+        super::apply_wrap(&t, "**"); // content stays selected -> toggles off
+        assert_eq!(super::buffer_source(&t), "un mot ici");
+    }
+
+    #[test]
+    fn qr_rgba_has_the_right_shape_and_draws_modules() {
+        let (buf, side) = super::qr_rgba("plainnote-pairing-blob", 3).unwrap();
+        // Square RGBA buffer, side a multiple of the scale, at least a v1 QR
+        // (21 modules) plus the 4-module quiet zone on each edge.
+        assert_eq!(buf.len(), side * side * 4);
+        assert_eq!(side % 3, 0);
+        assert!(side >= (21 + 8) * 3);
+        // The quiet zone keeps the top-left corner white; at least one dark
+        // module is drawn somewhere (a finder pattern).
+        assert_eq!(&buf[0..4], &[255, 255, 255, 255]);
+        assert!(buf.chunks(4).any(|p| p == [0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn heading_prefix_detects_level_and_caps_at_3() {
+        assert_eq!(heading_prefix("# Titre"), Some((1, 2)));
+        assert_eq!(heading_prefix("### Sous"), Some((3, 4)));
+        assert_eq!(heading_prefix("##### Deep"), Some((3, 6))); // capped at H3
+        assert_eq!(heading_prefix("#pas-espace"), None);
+        assert_eq!(heading_prefix("texte"), None);
+    }
+
+    #[test]
+    fn spans_hides_heading_prefix_and_sizes_content() {
+        use SpanKind::*;
+        assert_eq!(spans("# Titre"), vec![span(0, 2, Hidden), span(2, 7, H1)],);
+        // Heading content keeps its inline marks (offsets shifted past `## `).
+        assert_eq!(
+            spans("## a **b**"),
+            vec![
+                span(0, 3, Hidden),
+                span(3, 10, H2),
+                span(5, 7, Hidden),
+                span(7, 8, Bold),
+                span(8, 10, Hidden),
+            ],
+        );
+    }
+
+    #[test]
+    fn spans_offsets_are_absolute_across_lines() {
+        use SpanKind::*;
+        // Line 0 "a" (no spans), line 1 "# T" starts at char offset 2.
+        assert_eq!(spans("a\n# T"), vec![span(2, 4, Hidden), span(4, 5, H1)]);
+    }
+
+    #[test]
+    fn spans_leaves_plain_lines_to_inline() {
+        assert_eq!(spans("**x**"), inline_spans("**x**"));
+    }
+
+    #[test]
+    fn inline_spans_uses_char_offsets() {
+        // Accents count as one char each (offsets must be char, not byte).
+        use SpanKind::*;
+        assert_eq!(
+            inline_spans("é **à**"),
+            vec![span(2, 4, Hidden), span(4, 5, Bold), span(5, 7, Hidden)],
+        );
+    }
 
     #[test]
     fn expanded_round_trips() {
@@ -2245,11 +3716,52 @@ mod tests {
     }
 
     #[test]
-    fn wrap_and_unwrap_toggles() {
-        assert_eq!(wrap_or_unwrap("gras", "**"), "**gras**");
-        assert_eq!(wrap_or_unwrap("**gras**", "**"), "gras");
-        assert_eq!(wrap_or_unwrap("", "*"), "**");
-        assert_eq!(wrap_or_unwrap("x", "`"), "`x`");
+    fn toggle_wrap_wraps_a_selection() {
+        // Select "gras" (3..7) in "un gras ici" -> bold it, selection on content.
+        assert_eq!(
+            toggle_wrap("un gras ici", 3, 7, "**"),
+            ("un **gras** ici".to_string(), 5, 9),
+        );
+        // Empty selection -> insert the markers, caret between them.
+        assert_eq!(toggle_wrap("ab", 1, 1, "**"), ("a****b".to_string(), 3, 3));
+        assert_eq!(toggle_wrap("x", 0, 1, "`"), ("`x`".to_string(), 1, 2));
+    }
+
+    #[test]
+    fn toggle_wrap_unwraps_when_markers_are_outside_the_selection() {
+        // Regression: markers hidden, user selects only the visible content
+        // "gras" (5..9) of "un **gras** ici". Un-bold must strip the markers and
+        // leave no orphan `**` — this was the reported bug.
+        assert_eq!(
+            toggle_wrap("un **gras** ici", 5, 9, "**"),
+            ("un gras ici".to_string(), 3, 7),
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_unwraps_when_selection_includes_markers() {
+        assert_eq!(
+            toggle_wrap("un **gras** ici", 3, 11, "**"),
+            ("un gras ici".to_string(), 3, 7),
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_round_trips() {
+        let (bolded, s, e) = toggle_wrap("un gras ici", 3, 7, "**");
+        assert_eq!(
+            toggle_wrap(&bolded, s, e, "**"),
+            ("un gras ici".to_string(), 3, 7)
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_uses_char_offsets() {
+        // "é gras" — accents are one char; unwrap the already-bold "gras".
+        assert_eq!(
+            toggle_wrap("é **gras** ici", 4, 8, "**"),
+            ("é gras ici".to_string(), 2, 6),
+        );
     }
 
     #[test]
@@ -2269,6 +3781,63 @@ mod tests {
     }
 
     #[test]
+    fn line_prefix_removes_ordered_and_quote_and_strips_star() {
+        assert_eq!(toggle_line_prefix("1. a", "1. "), "a"); // remove ordered
+        assert_eq!(toggle_line_prefix("> a", "> "), "a"); // remove quote
+        assert_eq!(toggle_line_prefix("* a", "> "), "> a"); // strip `* `, add quote
+        assert_eq!(toggle_line_prefix("3. a", "- "), "- a"); // strip `N. `, add bullet
+    }
+
+    #[test]
+    fn heading_level_of_reads_the_level() {
+        assert_eq!(heading_level_of("## Titre"), 2);
+        assert_eq!(heading_level_of("###### x"), 6);
+        assert_eq!(heading_level_of("#no-space"), 0);
+        assert_eq!(heading_level_of("plain"), 0);
+    }
+
+    #[test]
+    fn toggle_wrap_handles_italic_and_strike() {
+        assert_eq!(
+            toggle_wrap("un mot", 3, 6, "*"),
+            ("un *mot*".to_string(), 4, 7)
+        );
+        assert_eq!(
+            toggle_wrap("un *mot*", 4, 7, "*"),
+            ("un mot".to_string(), 3, 6)
+        );
+        assert_eq!(
+            toggle_wrap("un ~~mot~~", 5, 8, "~~"),
+            ("un mot".to_string(), 3, 6)
+        );
+    }
+
+    #[test]
+    fn transform_block_applies_over_spanned_lines() {
+        assert_eq!(
+            transform_block("a\nb", 0, 3, |l| format!("- {l}")),
+            ("- a\n- b".to_string(), 0, 7),
+        );
+        // No real selection: only the line under the caret is transformed.
+        assert_eq!(
+            transform_block("x\ny\nz", 2, 2, |l| format!("> {l}")),
+            ("x\n> y\nz".to_string(), 2, 5),
+        );
+    }
+
+    #[test]
+    fn code_block_wraps_the_selection() {
+        assert_eq!(code_block("hi", 0, 2), ("```\nhi\n```".to_string(), 6, 6));
+        assert_eq!(code_block("", 0, 0), ("```\n\n```".to_string(), 4, 4));
+    }
+
+    #[test]
+    fn insert_link_uses_label_or_placeholder() {
+        assert_eq!(insert_link("", 0, 0), ("[texte](url)".to_string(), 8, 11));
+        assert_eq!(insert_link("ab", 0, 2), ("[ab](url)".to_string(), 5, 8));
+    }
+
+    #[test]
     fn count_text_pluralizes() {
         assert_eq!(count_text(""), "0 mots · 0 caractères");
         assert_eq!(count_text("a"), "1 mot · 1 caractère");
@@ -2278,40 +3847,5 @@ mod tests {
     #[test]
     fn count_text_ignores_extra_whitespace() {
         assert_eq!(count_text("  un   deux  "), "2 mots · 13 caractères");
-    }
-
-    #[test]
-    fn md_escapes_markup_special_chars() {
-        assert_eq!(md_to_pango("a < b & c"), "a &lt; b &amp; c");
-    }
-
-    #[test]
-    fn md_renders_emphasis_and_code() {
-        assert_eq!(md_to_pango("**gras**"), "<b>gras</b>");
-        assert_eq!(md_to_pango("*ital*"), "<i>ital</i>");
-        assert_eq!(md_to_pango("_ital_"), "<i>ital</i>");
-        assert_eq!(md_to_pango("`code`"), "<tt>code</tt>");
-    }
-
-    #[test]
-    fn md_renders_headings_and_lists() {
-        assert_eq!(
-            md_to_pango("# Titre"),
-            "<span size=\"xx-large\" weight=\"bold\">Titre</span>"
-        );
-        assert_eq!(md_to_pango("- item"), "• item");
-        assert_eq!(md_to_pango("* item"), "• item");
-    }
-
-    #[test]
-    fn md_renders_fenced_code_block_verbatim() {
-        assert_eq!(md_to_pango("```\na*b*\n```"), "<tt>a*b*</tt>");
-    }
-
-    #[test]
-    fn md_unmatched_delimiters_stay_balanced() {
-        // Toggle-splitting must never emit an unclosed tag.
-        let out = md_to_pango("**oups");
-        assert_eq!(out, "<b>oups</b>");
     }
 }
