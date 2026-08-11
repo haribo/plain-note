@@ -1,0 +1,9 @@
+# Align Android native libraries to a 16 KB max page size. Android 15 requires
+# 16 KB-aligned ELF LOAD segments on 16 KB-page devices; the NDK linker still
+# defaults to 4 KB (0x1000) up to NDK r27. Applies only to the Android targets,
+# which are built solely for the `mobile` crate. See issue #79.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

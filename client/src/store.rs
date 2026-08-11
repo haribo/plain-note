@@ -95,6 +95,15 @@ impl LocalStore {
         f(&doc)
     }
 
+    /// Like [`Self::read`], but hands the closure a `&mut NoteStore` for
+    /// read-only operations that need it (e.g. reading Automerge change
+    /// metadata). Takes a shared lock and does not persist.
+    pub fn read_mut<T>(&self, f: impl FnOnce(&mut NoteStore) -> Result<T>) -> Result<T> {
+        let _lock = self.lock(false)?;
+        let mut doc = self.load_raw()?;
+        f(&mut doc)
+    }
+
     /// Atomically load, mutate, and save under a single exclusive lock. This is
     /// the safe primitive for concurrent writers (CLI, daemon): each mutation
     /// sees the latest on-disk state and no update is lost.

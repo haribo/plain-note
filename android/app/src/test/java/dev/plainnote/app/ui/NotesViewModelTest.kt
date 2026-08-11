@@ -7,6 +7,7 @@ import dev.plainnote.app.data.NoteRepository
 import dev.plainnote.core.FolderInfo
 import dev.plainnote.core.NoteContent
 import dev.plainnote.core.NoteSummary
+import dev.plainnote.core.NoteVersionInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -16,6 +17,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -33,6 +35,8 @@ private class FakeRepo(
     var syncCount = 0
     var pairCount = 0
     var setBodyCount = 0
+    var restoreCount = 0
+    val versions = mutableListOf<NoteVersionInfo>()
 
     override fun listNotes(folder: String?): List<NoteSummary> = emptyList()
     override fun search(query: String): List<NoteSummary> = emptyList()
@@ -49,6 +53,14 @@ private class FakeRepo(
     override fun trash(id: String) {}
     override fun getNote(id: String): NoteContent =
         NoteContent(id, "", "", "", emptyList(), false)
+
+    override fun history(id: String): List<NoteVersionInfo> = versions.toList()
+    override fun noteAt(id: String, versionId: String): NoteContent =
+        NoteContent(id, "titre@$versionId", "corps@$versionId", "", emptyList(), false)
+
+    override fun restoreVersion(id: String, versionId: String) {
+        restoreCount++
+    }
 
     override fun setTitle(id: String, title: String) {}
     override fun setBody(id: String, text: String) {
@@ -123,6 +135,30 @@ class NotesViewModelTest {
         advanceUntilIdle()
         assertEquals("Appareil associé", vm.status.value)
         assertEquals(1, repo.pairCount)
+    }
+
+    @Test
+    fun history_preview_and_restore() = runTest(dispatcher) {
+        val repo = FakeRepo()
+        repo.versions.add(NoteVersionInfo("v-new", 2000))
+        repo.versions.add(NoteVersionInfo("v-old", 1000))
+        val vm = viewModel(repo)
+        vm.open("n")
+        advanceUntilIdle()
+
+        vm.openHistory()
+        advanceUntilIdle()
+        assertEquals(2, vm.history.value?.size)
+
+        vm.previewVersion("v-old")
+        advanceUntilIdle()
+        assertEquals("n", vm.versionPreview.value?.id)
+
+        vm.restoreVersion("v-old")
+        advanceUntilIdle()
+        assertEquals(1, repo.restoreCount)
+        assertNull("history closes after restore", vm.history.value)
+        assertNull("preview closes after restore", vm.versionPreview.value)
     }
 
     @Test

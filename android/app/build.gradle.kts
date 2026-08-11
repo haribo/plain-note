@@ -105,7 +105,8 @@ dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
 
     // UniFFI-generated Kotlin needs JNA (with the @aar classifier on Android).
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    // 5.15+ ships 16 KB-aligned native libs (Android 15 requirement, #79).
+    implementation("net.java.dev.jna:jna:5.15.0@aar")
 
     // JVM unit tests for the pure Kotlin editor transforms (no device, no native
     // lib: the UniFFI bindings load libplain_note_mobile.so lazily on the first
