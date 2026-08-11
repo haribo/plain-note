@@ -7,12 +7,10 @@ use ed25519_dalek::SigningKey;
 use note_core::{GroupKey, NoteStore, SyncConfig, sync_once};
 use note_relay::state::AppState;
 use note_relay::storage::{InMemoryStorage, Storage};
-use rand::RngCore;
-use rand::rngs::OsRng;
 
 fn signing_key() -> SigningKey {
     let mut seed = [0u8; 32];
-    OsRng.fill_bytes(&mut seed);
+    getrandom::fill(&mut seed).expect("OS RNG unavailable");
     SigningKey::from_bytes(&seed)
 }
 

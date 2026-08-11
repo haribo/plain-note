@@ -16,8 +16,6 @@ use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use note_protocol::{ClientMsg, PROTOCOL_VERSION, ServerMsg};
-use rand::RngCore;
-use rand::rngs::OsRng;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::state::{AppState, Broadcast};
@@ -47,7 +45,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<AppState>) -> anyhow::Res
 
     // 2. Challenge
     let mut challenge = [0u8; 32];
-    OsRng.fill_bytes(&mut challenge);
+    getrandom::fill(&mut challenge).expect("OS RNG unavailable");
     send(
         &mut socket,
         ServerMsg::Challenge {
