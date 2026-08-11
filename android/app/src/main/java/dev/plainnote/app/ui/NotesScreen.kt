@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Label
@@ -769,6 +770,9 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
                         IconButton(onClick = { editing = true }) {
                             Icon(Icons.Filled.Edit, contentDescription = "Éditer")
                         }
+                        IconButton(onClick = { vm.openHistory() }) {
+                            Icon(Icons.Filled.History, contentDescription = "Historique")
+                        }
                     }
                     IconButton(onClick = { vm.delete(note.id) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Supprimer")
@@ -847,6 +851,8 @@ private fun NoteEditor(vm: NotesViewModel, note: NoteContent) {
             onAdd = { t -> tags = tags + t; vm.addTag(note.id, t); showTag = false },
         )
     }
+
+    HistorySheet(vm)
 }
 
 @Composable
