@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use note_core::NoteMeta;
+use note_core::{Note, NoteMeta};
 use plain_note_client::commands::{self, FolderRow};
 use plain_note_client::store::{self, LocalStore};
 use plain_note_client::{config, remote};
@@ -39,6 +39,13 @@ pub struct NoteContent {
     pub folder: String,
     pub tags: Vec<String>,
     pub pinned: bool,
+}
+
+/// One entry in a note's history timeline (opaque id + when it was reached).
+#[derive(Debug, uniffi::Record)]
+pub struct NoteVersionInfo {
+    pub version_id: String,
+    pub timestamp: i64,
 }
 
 /// A folder with its resolved display path.
@@ -122,6 +129,17 @@ fn summary(m: NoteMeta) -> NoteSummary {
     }
 }
 
+fn content(n: Note) -> NoteContent {
+    NoteContent {
+        id: n.id.as_str().to_string(),
+        title: n.title,
+        text: n.text,
+        folder: n.folder,
+        tags: n.tags,
+        pinned: n.pinned,
+    }
+}
+
 /// The mobile app handle: a local store, the enrollment config path, and the
 /// operations over them.
 #[derive(uniffi::Object)]
@@ -171,14 +189,31 @@ impl NoteApp {
     /// Fetch a note's full content by id.
     pub fn get_note(&self, id: String) -> Result<NoteContent> {
         let n = commands::get(&self.store, &id).map_err(map)?;
-        Ok(NoteContent {
-            id: n.id.as_str().to_string(),
-            title: n.title,
-            text: n.text,
-            folder: n.folder,
-            tags: n.tags,
-            pinned: n.pinned,
-        })
+        Ok(content(n))
+    }
+
+    /// The note's version timeline, newest first.
+    pub fn history(&self, id: String) -> Result<Vec<NoteVersionInfo>> {
+        Ok(commands::history(&self.store, &id)
+            .map_err(map)?
+            .into_iter()
+            .map(|v| NoteVersionInfo {
+                version_id: v.version_id,
+                timestamp: v.timestamp,
+            })
+            .collect())
+    }
+
+    /// The note's content at a given version.
+    pub fn note_at(&self, id: String, version_id: String) -> Result<NoteContent> {
+        let n = commands::note_at(&self.store, &id, &version_id).map_err(map)?;
+        Ok(content(n))
+    }
+
+    /// Restore a note to a past version (a new forward edit).
+    pub fn restore_version(&self, id: String, version_id: String) -> Result<()> {
+        commands::restore_version(&self.store, now(), &id, &version_id).map_err(map)?;
+        Ok(())
     }
 
     pub fn set_title(&self, id: String, title: String) -> Result<()> {
@@ -414,5 +449,88 @@ mod tests {
         let app = temp_app();
         let err = app.get_note("deadbeef".into()).unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn error_mapping_classifies_each_variant() {
+        use anyhow::anyhow;
+        assert!(matches!(
+            map(anyhow!("ambiguous prefix xyz")),
+            AppError::Ambiguous(_)
+        ));
+        assert!(matches!(
+            map(anyhow!("totally unexpected")),
+            AppError::Invalid(_)
+        ));
+        assert!(matches!(
+            map(anyhow::Error::new(std::io::Error::other("disk"))),
+            AppError::Io(_)
+        ));
+        // map_net reclassifies the Invalid catch-all as Network, keeps the rest.
+        assert!(matches!(
+            map_net(anyhow!("totally unexpected")),
+            AppError::Network(_)
+        ));
+        assert!(matches!(
+            map_net(anyhow!("ambiguous prefix xyz")),
+            AppError::Ambiguous(_)
+        ));
+    }
+
+    #[test]
+    fn tag_add_remove_and_search() {
+        let app = temp_app();
+        let id = app.create_note().unwrap();
+        app.set_title(id.clone(), "Groceries".into()).unwrap();
+        app.add_tag(id.clone(), "urgent".into()).unwrap();
+        assert!(
+            app.get_note(id.clone())
+                .unwrap()
+                .tags
+                .contains(&"urgent".to_string())
+        );
+        app.remove_tag(id.clone(), "urgent".into()).unwrap();
+        assert!(app.get_note(id.clone()).unwrap().tags.is_empty());
+        let hits = app.search("grocer".into()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+    }
+
+    #[test]
+    fn empty_trash_purges_trashed_notes() {
+        let app = temp_app();
+        let id = app.create_note().unwrap();
+        app.trash(id).unwrap();
+        assert_eq!(app.empty_trash().unwrap(), 1);
+        assert!(app.list_trashed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_note_at_and_restore_via_facade() {
+        let app = temp_app();
+        let id = app.create_note().unwrap();
+        app.set_title(id.clone(), "V1".into()).unwrap();
+        let h = app.history(id.clone()).unwrap();
+        assert!(!h.is_empty());
+        let oldest = h.last().unwrap().version_id.clone();
+        let snap = app.note_at(id.clone(), oldest.clone()).unwrap();
+        assert_eq!(snap.id, id);
+        app.restore_version(id.clone(), oldest).unwrap();
+    }
+
+    #[test]
+    fn folder_rename_move_and_delete() {
+        let app = temp_app();
+        let parent = app.create_folder("Parent".into(), None).unwrap();
+        let child = app.create_folder("Child".into(), None).unwrap();
+        app.rename_folder(child.clone(), "Renamed".into()).unwrap();
+        app.move_folder(child.clone(), Some(parent.clone()))
+            .unwrap();
+        let folders = app.list_folders().unwrap();
+        let moved = folders.iter().find(|f| f.id == child).unwrap();
+        assert_eq!(moved.name, "Renamed");
+        assert_eq!(moved.parent, parent);
+        app.delete_folder(parent.clone()).unwrap();
+        assert!(app.list_folders().unwrap().iter().all(|f| f.id != parent));
     }
 }

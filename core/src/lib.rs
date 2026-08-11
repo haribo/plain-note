@@ -16,7 +16,8 @@ pub use crypto::{
 };
 pub use doc::{Block, Doc, Inline, Marks, TaskItem, doc_to_markdown, markdown_to_doc};
 pub use model::{
-    FolderId, FolderMeta, ModelError, Note, NoteId, NoteMeta, NoteStore, ROOT_FOLDER, Timestamp,
+    FolderId, FolderMeta, ModelError, Note, NoteId, NoteMeta, NoteStore, NoteVersion, ROOT_FOLDER,
+    Timestamp,
 };
 pub use sync::{SyncConfig, SyncError, sync_once};
 

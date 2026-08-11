@@ -252,6 +252,16 @@ mod tests {
     }
 
     #[test]
+    fn attachment_id_differs_for_different_content() {
+        let key = GroupKey::generate();
+        let g = [1u8; ID_LEN];
+        let e1 = seal_attachment(&key, g, b"alpha");
+        let e2 = seal_attachment(&key, g, b"beta");
+        assert_ne!(attachment_id(&e1), attachment_id(&e2));
+        assert_eq!(attachment_id(&e1).len(), 64); // SHA-256 hex
+    }
+
+    #[test]
     fn mismatched_device_id_fails() {
         // The AAD binds the origin device, so the relay cannot replay one
         // device's envelope into another device's slot.
