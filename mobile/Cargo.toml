@@ -1,0 +1,28 @@
+[package]
+name = "plain-note-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "plain_note_mobile"
+crate-type = ["cdylib", "lib"]
+
+# Standalone binding generator; built only with `--features bindgen`.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+note-core.workspace = true
+plain-note-client.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uniffi.workspace = true
+
+[features]
+# Enables the standalone `uniffi-bindgen` CLI (used to generate the Kotlin
+# bindings for the Android project). Off by default so normal builds stay lean.
+bindgen = ["uniffi/cli"]

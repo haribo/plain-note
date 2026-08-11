@@ -1,0 +1,51 @@
+name: release-snapshot
+
+# Manually-triggered unstable build from develop. NOT a versioned release —
+# see docs/release.md. Publishes a rolling `snapshot` pre-release of binaries.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Compute build stamp
+        id: stamp
+        run: echo "info=develop-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install GUI runtime deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
+      - name: Build release binaries
+        env:
+          PN_BUILD_INFO: ${{ steps.stamp.outputs.info }}
+        run: cargo build --release -p note-cli -p note-relay -p plain-note-gui
+
+      - name: Stage artifacts
+        env:
+          STAMP: ${{ steps.stamp.outputs.info }}
+        run: |
+          mkdir -p dist
+          cp target/release/pn "dist/pn-linux-x86_64-$STAMP"
+          cp target/release/pn-relay "dist/pn-relay-linux-x86_64-$STAMP"
+          cp target/release/plain-note-gui "dist/plain-note-gui-linux-x86_64-$STAMP"
+
+      - name: Publish snapshot pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAMP: ${{ steps.stamp.outputs.info }}
+        run: |
+          gh release delete snapshot --cleanup-tag --yes || true
+          gh release create snapshot \
+            --target develop \
+            --prerelease \
+            --title "Snapshot $STAMP" \
+            --notes "Unstable build from develop (\`$STAMP\`). **Not a versioned release.** Linux x86_64. The GUI binary needs GTK 4 + libadwaita installed at runtime. No Android build." \
+            dist/*

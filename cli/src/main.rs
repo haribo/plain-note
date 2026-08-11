@@ -15,7 +15,7 @@ const SHORT_ID: usize = 8;
 #[derive(Parser)]
 #[command(
     name = "pn",
-    version,
+    version = env!("PN_VERSION"),
     about = "Plain Note — local-first encrypted notes"
 )]
 struct Cli {
@@ -45,8 +45,17 @@ enum Command {
         #[arg(long)]
         tag: Option<String>,
     },
-    /// Print a note's Markdown body
-    Show { id: String },
+    /// Print a note's Markdown body (optionally an older version, see `history`)
+    Show {
+        id: String,
+        /// A version from `history`: an index (1 = newest) or a version id
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// List a note's version history, newest first
+    History { id: String },
+    /// Restore a note to an older version (a version index or id, see `history`)
+    Restore { id: String, version: String },
     /// Edit a note's body in $EDITOR
     #[command(visible_alias = "e")]
     Edit { id: String },
@@ -65,8 +74,17 @@ enum Command {
     /// Search titles and bodies (case-insensitive substring)
     #[command(visible_aliases = ["s", "find"])]
     Search { query: String },
-    /// Delete a note
+    /// Move a note to the trash
     Rm { id: String },
+    /// Pin a note (surfaced first)
+    Pin { id: String },
+    /// Unpin a note
+    Unpin { id: String },
+    /// Trash: list, restore, or empty
+    Trash {
+        #[command(subcommand)]
+        cmd: TrashCmd,
+    },
     /// Attach a file to a note (encrypt + upload to the relay)
     Attach { id: String, file: PathBuf },
     /// List a note's attachments
@@ -120,6 +138,17 @@ enum FolderCmd {
     },
     /// Delete a folder (its notes and subfolders move to its parent)
     Rm { id: String },
+}
+
+#[derive(Subcommand)]
+enum TrashCmd {
+    /// List trashed notes
+    #[command(visible_alias = "ls")]
+    List,
+    /// Restore a trashed note
+    Restore { id: String },
+    /// Permanently delete all trashed notes
+    Empty,
 }
 
 #[derive(Subcommand)]
@@ -180,12 +209,32 @@ async fn main() -> Result<()> {
             let notes = commands::search(&store, &query)?;
             print_notes(&store, &notes)?;
         }
-        Command::Show { id } => {
-            let note = commands::get(&store, &id)?;
+        Command::Show { id, at } => {
+            let note = match at {
+                Some(reference) => {
+                    let version = resolve_version(&store, &id, &reference)?;
+                    commands::note_at(&store, &id, &version)?
+                }
+                None => commands::get(&store, &id)?,
+            };
             print!("{}", note.text);
             if !note.text.ends_with('\n') {
                 println!();
             }
+        }
+        Command::History { id } => {
+            let versions = commands::history(&store, &id)?;
+            if versions.is_empty() {
+                println!("(no history)");
+            }
+            for (i, v) in versions.iter().enumerate() {
+                println!("{}\t{}\t{}", i + 1, v.timestamp, short(&v.author));
+            }
+        }
+        Command::Restore { id, version } => {
+            let version_id = resolve_version(&store, &id, &version)?;
+            let id = commands::restore_version(&store, now, &id, &version_id)?;
+            println!("restored {}", short(id.as_str()));
         }
         Command::Edit { id } => {
             let current = commands::get(&store, &id)?.text;
@@ -207,9 +256,26 @@ async fn main() -> Result<()> {
             commands::remove_tag(&store, now, &id, &tag)?;
         }
         Command::Rm { id } => {
-            let id = commands::delete(&store, &id)?;
-            println!("deleted {}", short(id.as_str()));
+            let id = commands::trash(&store, now, &id)?;
+            println!("moved {} to trash", short(id.as_str()));
         }
+        Command::Pin { id } => {
+            commands::set_pinned(&store, now, &id, true)?;
+        }
+        Command::Unpin { id } => {
+            commands::set_pinned(&store, now, &id, false)?;
+        }
+        Command::Trash { cmd } => match cmd {
+            TrashCmd::List => print_notes(&store, &commands::list_trashed(&store)?)?,
+            TrashCmd::Restore { id } => {
+                let id = commands::restore(&store, now, &id)?;
+                println!("restored {}", short(id.as_str()));
+            }
+            TrashCmd::Empty => {
+                let n = commands::empty_trash(&store)?;
+                println!("purged {n} note(s)");
+            }
+        },
         Command::Attach { id, file } => {
             let aid = remote::attach(&config::config_path(), &store, now, &id, &file).await?;
             println!("attached {}", short(&aid));
@@ -312,6 +378,21 @@ fn short(id: &str) -> &str {
     &id[..SHORT_ID.min(id.len())]
 }
 
+/// Resolve a version reference to a version id: a 1-based index into `history`
+/// (1 = newest), or a raw version id passed through as-is.
+fn resolve_version(store: &LocalStore, id: &str, reference: &str) -> Result<String> {
+    if let Ok(n) = reference.parse::<usize>() {
+        let versions = commands::history(store, id)?;
+        let v = n
+            .checked_sub(1)
+            .and_then(|i| versions.get(i))
+            .ok_or_else(|| anyhow::anyhow!("no version {reference} (see `pn history`)"))?;
+        Ok(v.version_id.clone())
+    } else {
+        Ok(reference.to_string())
+    }
+}
+
 fn print_notes(store: &LocalStore, notes: &[note_core::NoteMeta]) -> Result<()> {
     if notes.is_empty() {
         eprintln!("no notes");
@@ -333,7 +414,8 @@ fn print_notes(store: &LocalStore, notes: &[note_core::NoteMeta]) -> Result<()> 
         } else {
             format!("  #{}", n.tags.join(" #"))
         };
-        println!("{}  {title}{folder}{tags}", short(n.id.as_str()));
+        let pin = if n.pinned { "★ " } else { "" };
+        println!("{}  {pin}{title}{folder}{tags}", short(n.id.as_str()));
     }
     Ok(())
 }
