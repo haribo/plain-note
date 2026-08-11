@@ -40,7 +40,7 @@ async fn spawn_server(storage: Arc<InMemoryStorage>, admin: Option<String>) -> S
 }
 
 async fn send(ws: &mut Ws, m: ClientMsg) {
-    ws.send(Message::Text(m.to_json())).await.unwrap();
+    ws.send(Message::Text(m.to_json().into())).await.unwrap();
 }
 
 async fn recv(ws: &mut Ws) -> ServerMsg {
