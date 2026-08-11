@@ -10,8 +10,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use rand::RngCore;
-use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
@@ -84,7 +82,7 @@ pub trait Storage: Send + Sync {
 
 fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    OsRng.fill_bytes(&mut buf);
+    getrandom::fill(&mut buf).expect("OS RNG unavailable");
     hex::encode(buf)
 }
 

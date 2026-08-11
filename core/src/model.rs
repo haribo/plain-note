@@ -33,8 +33,6 @@ use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
     AutoCommit, AutomergeError, Change, ChangeHash, ObjId, ObjType, ROOT, ReadDoc, Value,
 };
-use rand::RngCore;
-use rand::rngs::OsRng;
 use std::collections::{HashMap, HashSet};
 
 /// Unix milliseconds. Supplied by the caller; the model never reads a clock.
@@ -88,7 +86,7 @@ pub struct NoteId(String);
 impl NoteId {
     pub fn generate() -> Self {
         let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
+        getrandom::fill(&mut bytes).expect("OS RNG unavailable");
         let mut s = String::with_capacity(32);
         for b in bytes {
             s.push_str(&format!("{b:02x}"));
@@ -115,7 +113,7 @@ pub struct FolderId(String);
 impl FolderId {
     pub fn generate() -> Self {
         let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
+        getrandom::fill(&mut bytes).expect("OS RNG unavailable");
         let mut s = String::with_capacity(32);
         for b in bytes {
             s.push_str(&format!("{b:02x}"));

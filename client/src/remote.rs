@@ -14,15 +14,13 @@ use note_protocol::{
     CreateGroupResponse, CreateInviteRequest, CreateInviteResponse, DeviceListResponse,
     EnrollRequest, EnrollResponse,
 };
-use rand::RngCore;
-use rand::rngs::OsRng;
 
 use crate::config::{PairingBlob, Settings, decode_blob, encode_blob, encode_key};
 use crate::store::{LocalStore, resolve_id};
 
 fn new_signing_key() -> ([u8; 32], SigningKey) {
     let mut seed = [0u8; 32];
-    OsRng.fill_bytes(&mut seed);
+    getrandom::fill(&mut seed).expect("OS RNG unavailable");
     let sk = SigningKey::from_bytes(&seed);
     (seed, sk)
 }

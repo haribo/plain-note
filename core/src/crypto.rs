@@ -13,8 +13,6 @@
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-use rand::RngCore;
-use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -82,7 +80,7 @@ impl GroupKey {
     /// Generate a fresh random group key from the OS CSPRNG.
     pub fn generate() -> Self {
         let mut bytes = [0u8; KEY_LEN];
-        OsRng.fill_bytes(&mut bytes);
+        getrandom::fill(&mut bytes).expect("OS RNG unavailable");
         Self(bytes)
     }
 
@@ -104,7 +102,7 @@ impl GroupKey {
 /// Seal `plaintext` into an envelope: `version || nonce || ciphertext`.
 pub fn seal(key: &GroupKey, aad: Aad, plaintext: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    getrandom::fill(&mut nonce).expect("OS RNG unavailable");
 
     let aad_bytes = aad.to_bytes();
     let ciphertext = key
