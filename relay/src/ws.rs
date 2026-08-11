@@ -186,7 +186,7 @@ fn err(code: &str, message: &str) -> ServerMsg {
 }
 
 fn json(msg: ServerMsg) -> Message {
-    Message::Text(msg.to_json())
+    Message::Text(msg.to_json().into())
 }
 
 async fn send(socket: &mut WebSocket, msg: ServerMsg) -> anyhow::Result<()> {

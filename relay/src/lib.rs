@@ -29,9 +29,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/v1/groups", post(routes::create_group))
         .route("/v1/invites", post(routes::create_invite))
         .route("/v1/devices", get(routes::list_devices))
-        .route("/v1/devices/:id", delete(routes::revoke_device))
+        .route("/v1/devices/{id}", delete(routes::revoke_device))
         .route(
-            "/v1/attachments/:id",
+            "/v1/attachments/{id}",
             put(routes::put_attachment).get(routes::get_attachment),
         )
         .route("/v1/sync", get(ws::ws_handler))
