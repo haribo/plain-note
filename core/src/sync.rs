@@ -191,7 +191,7 @@ fn hash_hex(hash: &ChangeHash) -> String {
 }
 
 async fn send(ws: &mut Ws, msg: ClientMsg) -> Result<(), SyncError> {
-    ws.send(Message::Text(msg.to_json()))
+    ws.send(Message::Text(msg.to_json().into()))
         .await
         .map_err(|e| SyncError::Connection(e.to_string()))
 }
