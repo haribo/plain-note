@@ -1,4 +1,6 @@
-# Plain Note
+<h1>
+  <img src="assets/plane.svg" alt="" height="40">&nbsp; Plain Note
+</h1>
 
 Open-source, cross-platform note manager with **end-to-end encrypted**
 synchronization through a **zero-knowledge relay**.
@@ -24,7 +26,8 @@ See [`docs/design/overview.md`](docs/design/overview.md) for the full design and
 | `cli/`        | Rust — command-line client (binary: `pn`) |
 | `relay/`      | Rust — zero-knowledge relay server (binary: `pn-relay`, Axum + WebSocket) |
 | `gui/`        | Rust — GTK4 + libadwaita desktop client (binary: `plain-note-gui`) |
-| Android       | Kotlin/Jetpack Compose over the Rust core via UniFFI (planned) |
+| `mobile/`     | Rust — UniFFI facade exposing the core to Kotlin (`plain-note-mobile`) |
+| `android/`    | Kotlin/Jetpack Compose app over the `mobile` facade (see `docs/android/`) |
 
 ## Build
 
@@ -100,6 +103,16 @@ pn remote pair <blob>
 pn sync
 ```
 
+For continuous background sync, run the daemon (re-syncs on local edits and
+polls for remote changes):
+
+```sh
+pn sync --watch
+```
+
+Enable it as a per-user service with the unit in
+[`packaging/systemd/`](packaging/systemd/plain-note-sync.service).
+
 Sync config lives at `$XDG_CONFIG_HOME/plain-note/config.json` (override with
 `$PN_CONFIG`); it holds this device's credentials and the E2E key.
 
@@ -111,14 +124,27 @@ A GTK4 + libadwaita desktop client shares the same store as `pn`:
 cargo run -p plain-note-gui
 ```
 
-v1 covers local editing (note list + Markdown editor + auto-save). Folder tree,
-tags, search, and live auto-sync in the GUI are in progress. Needs GTK 4 and
-libadwaita installed.
+A unified sidebar tree of folders and notes (notes without a folder sit at the
+root, and the expand/collapse state is remembered across restarts) with search, a **tabbed** Markdown editor (open several notes at once)
+with tags and auto-save, and **live auto-sync** (background, when the device is
+enrolled). Each note has a `⋯` menu
+to pin it (pinned notes surface first), move it to another folder, or send it to
+the trash; notes can also be **dragged** onto a folder (or onto empty space to
+reach the root) to move them; a **Corbeille** entry at the bottom of the sidebar toggles a view of
+trashed notes where they can be restored, purged, or emptied in bulk. Folders
+have their own `⋯` menu to rename, move, or delete them. An **Aperçu** toggle
+renders the note's Markdown in place. A formatting toolbar wraps the selection
+in Markdown (bold, italic, strikethrough, code, headings, lists, quote, code
+block, link) — `Ctrl+B`/`Ctrl+I`/`Ctrl+E`/`Ctrl+K` too. A footer shows the live
+word and character count. When the device is enrolled, files can be attached, downloaded,
+and removed straight from the editor. Keyboard shortcuts: `Ctrl+N` new note,
+`Ctrl+W` close tab, `Ctrl+F` search, `Ctrl+PageUp`/`Ctrl+PageDown` switch tabs.
+Needs GTK 4 (≥ 4.10) and libadwaita installed.
 
 ## Roadmap
 
 1. **Core + CLI + relay** — encrypted sync validated end to end. ✔
-2. **Linux GUI** (GTK4 + libadwaita) — in progress.
+2. **Linux GUI** (GTK4 + libadwaita) — notes, folders, tags, search, auto-sync. ✔
 3. **Android** (Kotlin/Compose via UniFFI).
 
 ## License

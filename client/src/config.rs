@@ -139,3 +139,87 @@ fn restrict_permissions(path: &std::path::Path) {
 
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &std::path::Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn unique_tmp(tag: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("pn-{tag}-{}-{n}.json", std::process::id()))
+    }
+
+    fn sample_settings() -> Settings {
+        Settings {
+            relay_url: "http://127.0.0.1:8787".into(),
+            group_id: "g".into(),
+            device_id: "d".into(),
+            signing_seed: encode_key(&[1u8; 32]),
+            e2e_key: encode_key(&[2u8; 32]),
+            device_token: String::new(),
+            last_seq: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_writes_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = unique_tmp("perms");
+        sample_settings().save_to(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "secret config must be owner-only");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ws_url_upgrades_scheme_and_appends_path() {
+        let mut s = sample_settings();
+        s.relay_url = "http://host:1/".into();
+        assert_eq!(s.ws_url(), "ws://host:1/v1/sync");
+        s.relay_url = "https://host".into();
+        assert_eq!(s.ws_url(), "wss://host/v1/sync");
+    }
+
+    #[test]
+    fn decode_32_rejects_wrong_length_and_non_base64() {
+        assert!(decode_32(&encode_key(&[0u8; 16])).is_err()); // too short
+        assert!(decode_32("not base64!!").is_err());
+        assert!(decode_32(&encode_key(&[0u8; 32])).is_ok());
+    }
+
+    #[test]
+    fn blob_round_trips_and_rejects_bad_version_and_garbage() {
+        let blob = PairingBlob {
+            v: 1,
+            relay_url: "r".into(),
+            group_id: "g".into(),
+            invite_code: "i".into(),
+            e2e_key: encode_key(&[3u8; 32]),
+        };
+        assert_eq!(
+            decode_blob(&encode_blob(&blob).unwrap()).unwrap().group_id,
+            "g"
+        );
+        let v2 = PairingBlob {
+            v: 2,
+            ..blob.clone()
+        };
+        assert!(decode_blob(&encode_blob(&v2).unwrap()).is_err()); // version gate
+        assert!(decode_blob("@@@not base64@@@").is_err());
+        assert!(decode_blob(&B64.encode(b"not json")).is_err());
+    }
+
+    #[test]
+    fn load_from_missing_is_friendly_and_garbage_fails() {
+        let missing = unique_tmp("missing");
+        let err = Settings::load_from(&missing).unwrap_err();
+        assert!(err.to_string().contains("no sync config"), "{err}");
+        let path = unique_tmp("garbage");
+        fs::write(&path, b"not json").unwrap();
+        assert!(Settings::load_from(&path).is_err());
+        let _ = fs::remove_file(&path);
+    }
+}

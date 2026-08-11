@@ -1,0 +1,7 @@
+.gradle/
+build/
+/local.properties
+/.idea/
+*.iml
+# Generated UniFFI bindings and cross-compiled .so land under build/.
+.kotlin/
