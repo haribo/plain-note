@@ -109,3 +109,106 @@ fn base64_decode(s: &str) -> Vec<u8> {
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
+
+/// Enroll an extra device into an existing group, sharing the same E2E key.
+fn enroll_device(
+    storage: &Arc<InMemoryStorage>,
+    group: &str,
+    url: &str,
+    e2e: &GroupKey,
+) -> SyncConfig {
+    let code = storage.create_invite(group).unwrap();
+    let sk = signing_key();
+    let (dev, _) = storage
+        .enroll(&code, sk.verifying_key().to_bytes().to_vec())
+        .unwrap();
+    SyncConfig {
+        relay_url: url.to_string(),
+        group_id: group.to_string(),
+        device_id: dev,
+        signing_key: sk,
+        e2e_key: e2e.clone(),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_title_edits_converge_through_relay() {
+    let (_url, cfg_a, cfg_b, _storage) = setup().await;
+
+    // Shared starting point.
+    let mut a = NoteStore::new();
+    let id = a.create_note(1000).unwrap();
+    a.set_title(&id, "start", 1000).unwrap();
+    sync_once(&cfg_a, &mut a, 0).await.unwrap();
+    let mut b = NoteStore::new();
+    sync_once(&cfg_b, &mut b, 0).await.unwrap();
+
+    // Both edit the SAME field concurrently (offline), then both sync.
+    a.set_title(&id, "from-a", 1010).unwrap();
+    b.set_title(&id, "from-b", 1010).unwrap();
+    sync_once(&cfg_a, &mut a, 0).await.unwrap(); // push from-a
+    sync_once(&cfg_b, &mut b, 0).await.unwrap(); // push from-b, pull from-a (merge)
+    sync_once(&cfg_a, &mut a, 0).await.unwrap(); // pull from-b (merge)
+
+    // The CRDT resolves the conflict deterministically: both converge to one
+    // value with no data loss or divergence.
+    let ta = a.get_note(&id).unwrap().unwrap().title;
+    let tb = b.get_note(&id).unwrap().unwrap().title;
+    assert_eq!(ta, tb, "both devices converge to the same title");
+    assert!(ta == "from-a" || ta == "from-b", "one edit wins: {ta}");
+}
+
+#[tokio::test]
+async fn three_devices_converge_through_relay() {
+    let (url, cfg_a, cfg_b, storage) = setup().await;
+    let cfg_c = enroll_device(&storage, &cfg_a.group_id, &url, &cfg_a.e2e_key);
+
+    // A seeds a note; B and C pull it.
+    let mut a = NoteStore::new();
+    let id = a.create_note(1000).unwrap();
+    a.set_title(&id, "Tri", 1000).unwrap();
+    sync_once(&cfg_a, &mut a, 0).await.unwrap();
+    let mut b = NoteStore::new();
+    let mut c = NoteStore::new();
+    sync_once(&cfg_b, &mut b, 0).await.unwrap();
+    sync_once(&cfg_c, &mut c, 0).await.unwrap();
+    assert_eq!(b.get_note(&id).unwrap().unwrap().title, "Tri");
+    assert_eq!(c.get_note(&id).unwrap().unwrap().title, "Tri");
+
+    // B and C each add a distinct tag; all three converge after re-syncing.
+    b.add_tag(&id, "beta", 1010).unwrap();
+    sync_once(&cfg_b, &mut b, 0).await.unwrap();
+    c.add_tag(&id, "gamma", 1010).unwrap();
+    sync_once(&cfg_c, &mut c, 0).await.unwrap(); // pushes gamma, pulls beta
+    sync_once(&cfg_a, &mut a, 0).await.unwrap(); // pulls beta + gamma
+    sync_once(&cfg_b, &mut b, 0).await.unwrap(); // pulls gamma
+
+    let want = vec!["beta".to_string(), "gamma".to_string()];
+    assert_eq!(a.get_note(&id).unwrap().unwrap().tags, want);
+    assert_eq!(b.get_note(&id).unwrap().unwrap().tags, want);
+    assert_eq!(c.get_note(&id).unwrap().unwrap().tags, want);
+}
+
+#[tokio::test]
+async fn incremental_pull_only_fetches_the_delta() {
+    let (_url, cfg_a, cfg_b, _storage) = setup().await;
+
+    let mut a = NoteStore::new();
+    let id = a.create_note(1000).unwrap();
+    a.set_title(&id, "v1", 1000).unwrap();
+    let seq1 = sync_once(&cfg_a, &mut a, 0).await.unwrap();
+    let mut b = NoteStore::new();
+    let seq_b1 = sync_once(&cfg_b, &mut b, 0).await.unwrap();
+    assert_eq!(seq_b1, seq1);
+    assert_eq!(b.get_note(&id).unwrap().unwrap().title, "v1");
+
+    // A makes more edits; B catches up from its high-water mark (delta pull).
+    a.set_title(&id, "v2", 1010).unwrap();
+    a.add_tag(&id, "t", 1010).unwrap();
+    let seq2 = sync_once(&cfg_a, &mut a, seq1).await.unwrap();
+    assert!(seq2 > seq1, "new changes advanced the seq");
+    let seq_b2 = sync_once(&cfg_b, &mut b, seq_b1).await.unwrap();
+    assert_eq!(seq_b2, seq2);
+    assert_eq!(b.get_note(&id).unwrap().unwrap().title, "v2");
+    assert_eq!(b.get_note(&id).unwrap().unwrap().tags, vec!["t"]);
+}

@@ -13,7 +13,7 @@ use adw::prelude::*;
 use gtk::glib;
 use note_core::{FolderId, NoteId, NoteStore, ROOT_FOLDER};
 use plain_note_client::store::{self, LocalStore};
-use plain_note_client::{config, remote};
+use plain_note_client::{commands, config, remote};
 
 const APP_ID: &str = "dev.plainnote.PlainNote";
 
@@ -2122,6 +2122,9 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     let source_toggle = gtk::ToggleButton::with_label("Source");
     source_toggle.set_tooltip_text(Some("Afficher le Markdown brut"));
     source_toggle.add_css_class("flat");
+    let history_btn = gtk::Button::from_icon_name("document-open-recent-symbolic");
+    history_btn.set_tooltip_text(Some("Historique des versions"));
+    history_btn.add_css_class("flat");
     let count_label = gtk::Label::new(None);
     count_label.add_css_class("dim-label");
     count_label.add_css_class("caption");
@@ -2133,7 +2136,18 @@ fn build_editor_pane(ui: &Ui, state: &Rc<RefCell<State>>, note: &note_core::Note
     footer.set_margin_top(4);
     footer.set_margin_bottom(6);
     footer.append(&source_toggle);
+    footer.append(&history_btn);
     footer.append(&count_label);
+    {
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        history_btn.connect_clicked(move |btn| {
+            open_history_dialog(btn, &ui, &state, &id, &buffer, &title);
+        });
+    }
 
     // Attachments row: one chip per attachment + an "add" button. The button is
     // only sensitive when the device is enrolled (attach needs the relay).
@@ -2987,6 +3001,224 @@ fn build_enrolled_body(body: &gtk::Box, settings: &config::Settings) {
     list_btn.connect_clicked(move |_| refresh());
 }
 
+/// Held reference to the history timeline's repaint closure, so a preview's
+/// "Back" can call it (self-reference through an `Rc` cell).
+type HistoryBack = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+/// Format a unix-millis timestamp as a local, human date for the history list.
+fn format_ts(ts: i64) -> String {
+    if let Ok(dt) = gtk::glib::DateTime::from_unix_local(ts / 1000)
+        && let Ok(s) = dt.format("%e %b %Y, %H:%M")
+    {
+        return s.to_string();
+    }
+    ts.to_string()
+}
+
+/// Per-note version history: a timeline, a read-only preview of any version, and
+/// restore. Reads are local (`commands::history`/`note_at`); restore is a
+/// forward edit that then refreshes the open editor. See docs/design/note-history.md.
+fn open_history_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    buffer: &gtk::TextBuffer,
+    title: &gtk::Entry,
+) {
+    let window = anchor.root().and_downcast::<gtk::Window>();
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Historique");
+    dialog.set_content_width(460);
+    dialog.set_content_height(560);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
+    body.set_margin_start(12);
+    body.set_margin_end(12);
+    let header = adw::HeaderBar::new();
+    let tv = adw::ToolbarView::new();
+    tv.add_top_bar(&header);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&body)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    tv.set_content(Some(&scroll));
+    dialog.set_child(Some(&tv));
+
+    let versions = commands::history(&state.borrow().store, id.as_str()).unwrap_or_default();
+
+    // `render_list` repaints the timeline; a preview's "Back" calls it again, so
+    // it is held indirectly to allow the self-reference.
+    type Render = Rc<dyn Fn()>;
+    let holder: Rc<RefCell<Option<Render>>> = Rc::new(RefCell::new(None));
+    let render_list: Render = Rc::new({
+        let body = body.clone();
+        let dialog = dialog.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        let holder = holder.clone();
+        move || {
+            while let Some(c) = body.first_child() {
+                body.remove(&c);
+            }
+            if versions.is_empty() {
+                let l = gtk::Label::new(Some("Aucune version antérieure."));
+                l.add_css_class("dim-label");
+                l.set_margin_top(24);
+                body.append(&l);
+                return;
+            }
+            let list = gtk::ListBox::new();
+            list.set_selection_mode(gtk::SelectionMode::None);
+            list.add_css_class("boxed-list");
+            for (i, v) in versions.iter().enumerate() {
+                let row = adw::ActionRow::new();
+                row.set_title(&format_ts(v.timestamp));
+                row.set_activatable(true);
+                if i == 0 {
+                    let chip = gtk::Label::new(Some("Actuel"));
+                    chip.add_css_class("accent");
+                    chip.add_css_class("caption-heading");
+                    chip.set_valign(gtk::Align::Center);
+                    row.add_suffix(&chip);
+                } else {
+                    let arrow = gtk::Image::from_icon_name("go-next-symbolic");
+                    row.add_suffix(&arrow);
+                }
+                let version_id = v.version_id.clone();
+                let body = body.clone();
+                let dialog = dialog.clone();
+                let ui = ui.clone();
+                let state = state.clone();
+                let id = id.clone();
+                let buffer = buffer.clone();
+                let title = title.clone();
+                let holder = holder.clone();
+                row.connect_activated(move |_| {
+                    history_preview(
+                        &body,
+                        &dialog,
+                        &ui,
+                        &state,
+                        &id,
+                        &buffer,
+                        &title,
+                        &version_id,
+                        &holder,
+                    );
+                });
+                list.append(&row);
+            }
+            body.append(&list);
+        }
+    });
+    *holder.borrow_mut() = Some(render_list.clone());
+    render_list();
+    dialog.present(window.as_ref());
+}
+
+/// A read-only preview of one version, with Restore and Back.
+#[allow(clippy::too_many_arguments)]
+fn history_preview(
+    body: &gtk::Box,
+    dialog: &adw::Dialog,
+    ui: &Ui,
+    state: &Rc<RefCell<State>>,
+    id: &NoteId,
+    buffer: &gtk::TextBuffer,
+    title: &gtk::Entry,
+    version_id: &str,
+    back: &HistoryBack,
+) {
+    let Ok(snapshot) = commands::note_at(&state.borrow().store, id.as_str(), version_id) else {
+        if let Some(f) = back.borrow().as_ref() {
+            f();
+        }
+        return;
+    };
+    while let Some(c) = body.first_child() {
+        body.remove(&c);
+    }
+    let banner = gtk::Label::new(Some(
+        "Version en lecture seule — le texte actuel n'est pas modifié.",
+    ));
+    banner.add_css_class("dim-label");
+    banner.set_halign(gtk::Align::Start);
+    banner.set_wrap(true);
+    body.append(&banner);
+
+    let preview = gtk::TextView::new();
+    preview.set_editable(false);
+    preview.set_cursor_visible(false);
+    preview.set_wrap_mode(gtk::WrapMode::WordChar);
+    preview.set_left_margin(8);
+    preview.set_right_margin(8);
+    preview.set_top_margin(8);
+    let heading = if snapshot.title.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", snapshot.title)
+    };
+    preview
+        .buffer()
+        .set_text(&format!("{heading}{}", snapshot.text));
+    let sw = gtk::ScrolledWindow::builder()
+        .child(&preview)
+        .vexpand(true)
+        .build();
+    body.append(&sw);
+
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    bar.set_halign(gtk::Align::End);
+    let back_btn = gtk::Button::with_label("Retour");
+    {
+        let back = back.clone();
+        back_btn.connect_clicked(move |_| {
+            if let Some(f) = back.borrow().as_ref() {
+                f();
+            }
+        });
+    }
+    let restore_btn = gtk::Button::with_label("Restaurer cette version");
+    restore_btn.add_css_class("suggested-action");
+    {
+        let dialog = dialog.clone();
+        let ui = ui.clone();
+        let state = state.clone();
+        let id = id.clone();
+        let buffer = buffer.clone();
+        let title = title.clone();
+        let version_id = version_id.to_string();
+        restore_btn.connect_clicked(move |_| {
+            let now = store::now_millis();
+            if commands::restore_version(&state.borrow().store, now, id.as_str(), &version_id)
+                .is_err()
+            {
+                return;
+            }
+            // Refresh the open editor from the restored note without re-saving.
+            if let Ok(note) = commands::get(&state.borrow().store, id.as_str()) {
+                state.borrow_mut().loading = true;
+                title.set_text(&note.title);
+                buffer.set_text(&note.text);
+                state.borrow_mut().loading = false;
+            }
+            reload_from_disk(&state);
+            rebuild_tree(&ui, &state);
+            dialog.close();
+        });
+    }
+    bar.append(&back_btn);
+    bar.append(&restore_btn);
+    body.append(&bar);
+}
+
 fn maybe_reload(ui: &Ui, state: &Rc<RefCell<State>>) {
     let Ok(doc) = state.borrow().store.load() else {
         return;
@@ -3294,12 +3526,34 @@ mod tests {
     }
 
     #[test]
-    fn buffer_source_keeps_hidden_markers() {
+    fn content_sig_is_stable_and_detects_changes() {
+        // Guards the reload-diff: `maybe_reload` overwrites the buffer only when
+        // the signature changes, so it must be stable when nothing changed and
+        // differ on title/folder edits. Pure (no GTK), runs headless.
+        use note_core::{NoteStore, ROOT_FOLDER};
+        let mut d = NoteStore::new();
+        let id = d.create_note(1).unwrap();
+        d.set_title(&id, "One", 1).unwrap();
+        let sig = super::content_sig(&d);
+        assert_eq!(sig, super::content_sig(&d), "stable when unchanged");
+        d.set_title(&id, "Two", 2).unwrap();
+        assert_ne!(sig, super::content_sig(&d), "title edit detected");
+        let sig2 = super::content_sig(&d);
+        let f = d.create_folder("F", ROOT_FOLDER, 3).unwrap();
+        d.move_note(&id, f.as_str(), 3).unwrap();
+        assert_ne!(sig2, super::content_sig(&d), "folder move detected");
+    }
+
+    /// All GTK-widget tests live in ONE `#[test]`: GTK is single-threaded per
+    /// process, and `cargo test` spreads separate tests across worker threads, so
+    /// a second `gtk::init()` on another thread fails. Running everything on one
+    /// thread after a single init is the only harness that survives the parallel
+    /// runner (and CI). Needs a display — xvfb in CI, with PN_REQUIRE_GTK set so a
+    /// missing display fails loudly instead of skipping.
+    #[test]
+    fn gtk_editor_glue() {
         use gtk::prelude::*;
-        // Regression for #154: a WYSIWYG-hidden marker (invisible tag) must still
-        // be returned by buffer_source, else the note is saved/rewritten without
-        // it. GTK needs a display; CI provides one via xvfb and sets
-        // PN_REQUIRE_GTK so a missing display fails loudly instead of skipping.
+        use note_core::NoteStore;
         if gtk::init().is_err() {
             assert!(
                 std::env::var_os("PN_REQUIRE_GTK").is_none(),
@@ -3307,16 +3561,60 @@ mod tests {
             );
             return;
         }
+
+        // --- #154 unit: a hidden marker is dropped by the raw read but kept by
+        // buffer_source ---
         let b = gtk::TextBuffer::new(None);
         b.set_text("**bold**");
         let hide = gtk::TextTag::builder().invisible(true).build();
         b.tag_table().add(&hide);
         b.apply_tag(&hide, &b.iter_at_offset(0), &b.iter_at_offset(2));
-        // The buggy read (include_hidden_chars = false) drops the hidden `**`.
         let stripped = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
         assert_eq!(stripped, "bold**");
-        // buffer_source keeps the full source.
         assert_eq!(super::buffer_source(&b), "**bold**");
+
+        // --- integration: hide every marker like `restyle`, then confirm the
+        // save path preserves the full source across every construct ---
+        let source = "# Titre\nUn **gras**, de l'*ital*, du `code`, du ~~barré~~.\n\
+             Voir [lien](https://exemple.org).\n> une citation\n- puce une\n\
+             - puce deux\n1. étape une\n```rust\nlet x = 1;\n```";
+        let buffer = gtk::TextBuffer::new(None);
+        buffer.set_text(source);
+        let hide2 = gtk::TextTag::builder().invisible(true).build();
+        buffer.tag_table().add(&hide2);
+        for s in super::spans(source) {
+            if s.kind == super::SpanKind::Hidden {
+                buffer.apply_tag(
+                    &hide2,
+                    &buffer.iter_at_offset(s.start as i32),
+                    &buffer.iter_at_offset(s.end as i32),
+                );
+            }
+        }
+        let visible = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string();
+        assert!(
+            !visible.contains("**") && !visible.contains("```") && !visible.contains("~~"),
+            "markers are hidden from the visible text: {visible:?}"
+        );
+        assert_eq!(super::buffer_source(&buffer), source);
+        let mut store = NoteStore::new();
+        let id = store.create_note(1).unwrap();
+        store
+            .replace_text(&id, &super::buffer_source(&buffer), 1)
+            .unwrap();
+        assert_eq!(store.get_note(&id).unwrap().unwrap().text, source);
+
+        // --- integration: the toolbar bold/unbold cycle through a real selection
+        // (sel_bounds + toggle_wrap + replace_and_select) ---
+        let t = gtk::TextBuffer::new(None);
+        t.set_text("un mot ici");
+        t.select_range(&t.iter_at_offset(3), &t.iter_at_offset(6)); // "mot"
+        super::apply_wrap(&t, "**");
+        assert_eq!(super::buffer_source(&t), "un **mot** ici");
+        super::apply_wrap(&t, "**"); // content stays selected -> toggles off
+        assert_eq!(super::buffer_source(&t), "un mot ici");
     }
 
     #[test]

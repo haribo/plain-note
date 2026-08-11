@@ -95,6 +95,15 @@ impl LocalStore {
         f(&doc)
     }
 
+    /// Like [`Self::read`], but hands the closure a `&mut NoteStore` for
+    /// read-only operations that need it (e.g. reading Automerge change
+    /// metadata). Takes a shared lock and does not persist.
+    pub fn read_mut<T>(&self, f: impl FnOnce(&mut NoteStore) -> Result<T>) -> Result<T> {
+        let _lock = self.lock(false)?;
+        let mut doc = self.load_raw()?;
+        f(&mut doc)
+    }
+
     /// Atomically load, mutate, and save under a single exclusive lock. This is
     /// the safe primitive for concurrent writers (CLI, daemon): each mutation
     /// sees the latest on-disk state and no update is lost.
@@ -232,6 +241,22 @@ pub fn edit_in_editor(initial: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_rejects_a_corrupt_store_file() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "pn-corrupt-{}-{}.automerge",
+            std::process::id(),
+            CTR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, b"not an automerge document").unwrap();
+        let store = LocalStore::new_single_process(&path);
+        assert!(store.load().is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn resolve_unique_prefix() {

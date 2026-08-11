@@ -105,12 +105,15 @@ dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
 
     // UniFFI-generated Kotlin needs JNA (with the @aar classifier on Android).
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    // 5.15+ ships 16 KB-aligned native libs (Android 15 requirement, #79).
+    implementation("net.java.dev.jna:jna:5.15.0@aar")
 
     // JVM unit tests for the pure Kotlin editor transforms (no device, no native
     // lib: the UniFFI bindings load libplain_note_mobile.so lazily on the first
     // FFI call, and these tests only construct data classes + call transforms).
     testImplementation("junit:junit:4.13.2")
+    // Deterministic coroutine testing for the ViewModel (virtual time + Main).
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     // Screenshot tests (L3): Roborazzi renders composables via Robolectric on the
     // JVM — deterministic golden PNGs, no device.

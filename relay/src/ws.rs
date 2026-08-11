@@ -107,6 +107,12 @@ async fn run_session(mut socket: WebSocket, state: Arc<AppState>) -> anyhow::Res
                     sink.send(json(err("protocol", "malformed message"))).await?;
                     continue;
                 };
+                // Enforce revocation mid-session: a device revoked after auth
+                // must stop syncing on its live socket, not just on reconnect.
+                if state.storage.device(&device_id).is_none() {
+                    sink.send(json(err("unauthorized", "device revoked"))).await?;
+                    break;
+                }
                 match cmsg {
                     ClientMsg::Push { envelope, client_change_id } => {
                         let (seq, is_new) = state.storage.append_change(

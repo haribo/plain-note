@@ -29,7 +29,7 @@
 //! Timestamps are passed in by the caller ([`Timestamp`]) so the model stays
 //! pure and deterministic; the core does no clock or I/O access.
 
-use automerge::transaction::Transactable;
+use automerge::transaction::{CommitOptions, Transactable};
 use automerge::{
     AutoCommit, AutomergeError, Change, ChangeHash, ObjId, ObjType, ROOT, ReadDoc, Value,
 };
@@ -45,6 +45,12 @@ const FOLDER: &str = "folder";
 const TEXT: &str = "text";
 const TAGS: &str = "tags";
 const ATTACHMENTS: &str = "attachments";
+
+/// History: most recent versions kept per note (display cap, not storage).
+const HISTORY_CAP: usize = 100;
+/// History: consecutive same-author edits within this gap coalesce into one
+/// version; a longer gap (or an author change) starts a new one.
+const HISTORY_IDLE_MS: Timestamp = 5 * 60 * 1000;
 const CREATED: &str = "created";
 const UPDATED: &str = "updated";
 const NAME: &str = "name";
@@ -165,6 +171,18 @@ pub struct Note {
     pub updated: Timestamp,
 }
 
+/// One entry in a note's history timeline: a past content state, when it was
+/// reached, and an opaque author token (an Automerge actor). See
+/// `docs/design/note-history.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteVersion {
+    /// Opaque handle to the snapshot's heads; pass back to `note_at`/`restore`.
+    pub version_id: String,
+    pub timestamp: Timestamp,
+    /// Opaque per-instance author token (not a stable device name in v1).
+    pub author: String,
+}
+
 /// A collection of notes backed by a single Automerge document.
 pub struct NoteStore {
     doc: AutoCommit,
@@ -240,6 +258,8 @@ impl NoteStore {
         self.doc.put(&note, TRASHED, false)?;
         self.doc.put(&note, CREATED, now)?;
         self.doc.put(&note, UPDATED, now)?;
+        self.doc
+            .commit_with(CommitOptions::default().with_time(now));
         Ok(id)
     }
 
@@ -466,6 +486,205 @@ impl NoteStore {
         }))
     }
 
+    // --- history (see docs/design/note-history.md) ---
+
+    /// The note's version timeline, newest first (capped at [`HISTORY_CAP`]).
+    /// Versions coalesce consecutive same-author edits within [`HISTORY_IDLE_MS`];
+    /// an author change or a longer gap starts a new version. Steps where the
+    /// note's content is unchanged are skipped (zero-diff), which also filters
+    /// out changes that touched other notes.
+    pub fn note_history(&mut self, id: &NoteId) -> Result<Vec<NoteVersion>, ModelError> {
+        // Content-changing steps in causal order: (heads, time, author).
+        let steps: Vec<(ChangeHash, Timestamp, String)> = self
+            .doc
+            .get_changes(&[])
+            .into_iter()
+            .map(|c| (c.hash(), c.timestamp(), c.actor_id().to_hex_string()))
+            .collect();
+
+        let mut out: Vec<NoteVersion> = Vec::new();
+        let mut prev_content: Option<(String, String, Vec<String>, String)> = None;
+        let mut prev_time: Timestamp = 0;
+        for (hash, time, author) in steps {
+            let Some(note) = self.note_at_heads(id, &[hash])? else {
+                continue; // note did not exist at this point
+            };
+            let content = (note.title, note.text, note.tags, note.folder);
+            if prev_content.as_ref() == Some(&content) {
+                continue; // no change to this note here
+            }
+            prev_content = Some(content);
+            // Coalesce into the last version if same author within the idle gap.
+            let extend = out
+                .last()
+                .is_some_and(|v| v.author == author && time - prev_time < HISTORY_IDLE_MS);
+            prev_time = time;
+            if extend {
+                let v = out.last_mut().unwrap();
+                v.version_id = hash.to_string();
+                v.timestamp = time;
+            } else {
+                out.push(NoteVersion {
+                    version_id: hash.to_string(),
+                    timestamp: time,
+                    author,
+                });
+            }
+        }
+
+        // Newest first, capped.
+        out.reverse();
+        out.truncate(HISTORY_CAP);
+        Ok(out)
+    }
+
+    /// The note's content at a version from [`Self::note_history`].
+    pub fn note_at(&self, id: &NoteId, version_id: &str) -> Result<Option<Note>, ModelError> {
+        let heads = parse_version_id(version_id)?;
+        self.note_at_heads(id, &heads)
+    }
+
+    /// Restore the note's content to a past version. This is a forward,
+    /// merge-safe edit (title/body/tags/folder), itself a new history entry; the
+    /// folder is only restored if it still exists.
+    pub fn restore(
+        &mut self,
+        id: &NoteId,
+        version_id: &str,
+        now: Timestamp,
+    ) -> Result<(), ModelError> {
+        let heads = parse_version_id(version_id)?;
+        let snap = self
+            .note_at_heads(id, &heads)?
+            .ok_or_else(|| ModelError::NotFound(id.0.clone()))?;
+        self.set_title(id, &snap.title, now)?;
+        self.replace_text(id, &snap.text, now)?;
+        let current = self.get_note(id)?.map(|n| n.tags).unwrap_or_default();
+        for tag in &current {
+            if !snap.tags.contains(tag) {
+                self.remove_tag(id, tag, now)?;
+            }
+        }
+        for tag in &snap.tags {
+            if !current.contains(tag) {
+                self.add_tag(id, tag, now)?;
+            }
+        }
+        if self.require_folder(&snap.folder).is_ok() {
+            self.move_note(id, &snap.folder, now)?;
+        }
+        Ok(())
+    }
+
+    /// Read a note as it was at `heads` (historical snapshot).
+    fn note_at_heads(&self, id: &NoteId, heads: &[ChangeHash]) -> Result<Option<Note>, ModelError> {
+        let Some(note) = self.child_object_at(&ROOT, id.as_str(), heads)? else {
+            return Ok(None);
+        };
+        let text = match self.child_object_at(&note, TEXT, heads)? {
+            Some(t) => self.doc.text_at(&t, heads)?,
+            None => String::new(),
+        };
+        Ok(Some(Note {
+            id: id.clone(),
+            title: self.str_field_at(&note, TITLE, heads)?,
+            folder: self.str_field_at(&note, FOLDER, heads)?,
+            text,
+            tags: self.keys_of_at(&note, TAGS, heads)?,
+            attachments: self.entries_of_at(&note, ATTACHMENTS, heads)?,
+            pinned: self.bool_field_at(&note, PINNED, heads)?,
+            trashed: self.bool_field_at(&note, TRASHED, heads)?,
+            created: self.int_field_at(&note, CREATED, heads)?,
+            updated: self.int_field_at(&note, UPDATED, heads)?,
+        }))
+    }
+
+    fn child_object_at(
+        &self,
+        obj: &ObjId,
+        key: &str,
+        heads: &[ChangeHash],
+    ) -> Result<Option<ObjId>, ModelError> {
+        match self.doc.get_at(obj, key, heads)? {
+            Some((Value::Object(_), id)) => Ok(Some(id)),
+            _ => Ok(None),
+        }
+    }
+
+    fn str_field_at(
+        &self,
+        obj: &ObjId,
+        key: &str,
+        heads: &[ChangeHash],
+    ) -> Result<String, ModelError> {
+        Ok(self
+            .doc
+            .get_at(obj, key, heads)?
+            .and_then(|(v, _)| v.to_str().map(str::to_owned))
+            .unwrap_or_default())
+    }
+
+    fn int_field_at(
+        &self,
+        obj: &ObjId,
+        key: &str,
+        heads: &[ChangeHash],
+    ) -> Result<Timestamp, ModelError> {
+        Ok(self
+            .doc
+            .get_at(obj, key, heads)?
+            .and_then(|(v, _)| v.to_i64())
+            .unwrap_or_default())
+    }
+
+    fn bool_field_at(
+        &self,
+        obj: &ObjId,
+        key: &str,
+        heads: &[ChangeHash],
+    ) -> Result<bool, ModelError> {
+        Ok(self
+            .doc
+            .get_at(obj, key, heads)?
+            .and_then(|(v, _)| v.to_bool())
+            .unwrap_or(false))
+    }
+
+    fn keys_of_at(
+        &self,
+        note: &ObjId,
+        key: &str,
+        heads: &[ChangeHash],
+    ) -> Result<Vec<String>, ModelError> {
+        match self.child_object_at(note, key, heads)? {
+            Some(map) => {
+                let mut ks: Vec<String> = self.doc.keys_at(&map, heads).collect();
+                ks.sort();
+                Ok(ks)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn entries_of_at(
+        &self,
+        note: &ObjId,
+        key: &str,
+        heads: &[ChangeHash],
+    ) -> Result<Vec<(String, String)>, ModelError> {
+        match self.child_object_at(note, key, heads)? {
+            Some(map) => {
+                let mut out = Vec::new();
+                for k in self.doc.keys_at(&map, heads) {
+                    out.push((k.clone(), self.str_field_at(&map, &k, heads)?));
+                }
+                out.sort();
+                Ok(out)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Metadata for every active (non-trashed) note, unordered.
     pub fn list(&self) -> Result<Vec<NoteMeta>, ModelError> {
         let mut out = Vec::new();
@@ -574,6 +793,11 @@ impl NoteStore {
 
     fn touch(&mut self, note: &ObjId, now: Timestamp) -> Result<(), ModelError> {
         self.doc.put(note, UPDATED, now)?;
+        // Commit each edit as its own change stamped with the caller's time: this
+        // keeps change timestamps deterministic (the model reads no clock) and
+        // gives note history a per-edit granularity to coalesce.
+        self.doc
+            .commit_with(CommitOptions::default().with_time(now));
         Ok(())
     }
 
@@ -713,6 +937,14 @@ fn folder_key(id: &str) -> String {
 
 fn is_folder_key(key: &str) -> bool {
     key.starts_with(FOLDER_PREFIX)
+}
+
+/// Decode a `version_id` (from [`NoteStore::note_history`]) back into heads.
+fn parse_version_id(version_id: &str) -> Result<Vec<ChangeHash>, ModelError> {
+    version_id
+        .parse::<ChangeHash>()
+        .map(|h| vec![h])
+        .map_err(|_| ModelError::Malformed("invalid version id"))
 }
 
 #[cfg(test)]
@@ -962,5 +1194,162 @@ mod tests {
         b2.merge(&mut a2).unwrap();
 
         assert_eq!(a.get_note(&id).unwrap(), b2.get_note(&id).unwrap());
+    }
+
+    #[test]
+    fn add_and_remove_attachment() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(1).unwrap();
+        s.add_attachment(&id, "att1", "photo.png", 1).unwrap();
+        assert_eq!(
+            s.get_note(&id).unwrap().unwrap().attachments,
+            vec![("att1".to_string(), "photo.png".to_string())]
+        );
+        s.remove_attachment(&id, "att1", 2).unwrap();
+        assert!(s.get_note(&id).unwrap().unwrap().attachments.is_empty());
+    }
+
+    #[test]
+    fn concurrent_text_edits_merge() {
+        // The headline CRDT claim: concurrent char-level body edits both survive.
+        let mut a = NoteStore::new();
+        let id = a.create_note(1).unwrap();
+        a.replace_text(&id, "hello world", 1).unwrap();
+        let mut b = NoteStore::load(&a.save()).unwrap();
+        a.splice_text(&id, 11, 0, "!", 2).unwrap(); // append at the end
+        b.splice_text(&id, 0, 0, ">> ", 2).unwrap(); // prepend at the start
+        a.merge(&mut b).unwrap();
+        let text = a.get_note(&id).unwrap().unwrap().text;
+        assert!(text.starts_with(">> "), "b's edit survived: {text:?}");
+        assert!(text.ends_with('!'), "a's edit survived: {text:?}");
+        assert!(text.contains("hello world"));
+    }
+
+    #[test]
+    fn delete_note_wins_over_concurrent_edit() {
+        // A hard delete on one device removes the note despite a concurrent edit
+        // on another — the delete is not silently undone by the edit.
+        let mut a = NoteStore::new();
+        let id = a.create_note(1).unwrap();
+        a.replace_text(&id, "keep", 1).unwrap();
+        let mut b = NoteStore::load(&a.save()).unwrap();
+        a.delete_note(&id).unwrap();
+        b.set_title(&id, "edited", 2).unwrap();
+        a.merge(&mut b).unwrap();
+        assert!(a.get_note(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_rejects_corrupt_bytes() {
+        assert!(NoteStore::load(&[0xde, 0xad, 0xbe, 0xef]).is_err());
+    }
+
+    #[test]
+    fn apply_change_bytes_rejects_malformed() {
+        let mut s = NoteStore::new();
+        let err = s.apply_change_bytes(vec![1, 2, 3, 4]).unwrap_err();
+        assert!(matches!(err, ModelError::InvalidChange));
+    }
+
+    // --- note history ---
+
+    #[test]
+    fn history_coalesces_sessions_and_reads_each_version() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(0).unwrap();
+        s.set_title(&id, "A", 0).unwrap();
+        s.replace_text(&id, "one", 0).unwrap();
+        s.replace_text(&id, "one!", 60_000).unwrap(); // <5 min: same version
+        s.replace_text(&id, "two", 2 * HISTORY_IDLE_MS).unwrap(); // new version
+        s.replace_text(&id, "three", 4 * HISTORY_IDLE_MS).unwrap();
+
+        let h = s.note_history(&id).unwrap();
+        assert_eq!(h.len(), 3, "one coalesced session + two later edits");
+        // Newest first, and each version reads back its historical content.
+        assert_eq!(
+            s.note_at(&id, &h[0].version_id).unwrap().unwrap().text,
+            "three"
+        );
+        assert_eq!(
+            s.note_at(&id, &h[1].version_id).unwrap().unwrap().text,
+            "two"
+        );
+        let oldest = s.note_at(&id, &h[2].version_id).unwrap().unwrap();
+        assert_eq!(oldest.text, "one!");
+        assert_eq!(oldest.title, "A");
+    }
+
+    #[test]
+    fn restore_reverts_content_and_is_itself_a_version() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(0).unwrap();
+        s.replace_text(&id, "original", 0).unwrap();
+        s.add_tag(&id, "keep", 0).unwrap();
+        s.replace_text(&id, "changed", 2 * HISTORY_IDLE_MS).unwrap();
+        s.remove_tag(&id, "keep", 2 * HISTORY_IDLE_MS).unwrap();
+
+        let h = s.note_history(&id).unwrap();
+        let oldest = h.last().unwrap().version_id.clone();
+        let before = h.len();
+
+        s.restore(&id, &oldest, 4 * HISTORY_IDLE_MS).unwrap();
+        let now = s.get_note(&id).unwrap().unwrap();
+        assert_eq!(now.text, "original");
+        assert_eq!(now.tags, vec!["keep"]);
+        assert!(
+            s.note_history(&id).unwrap().len() > before,
+            "restore is a forward edit, so a new version"
+        );
+    }
+
+    #[test]
+    fn restore_is_merge_safe() {
+        let mut a = NoteStore::new();
+        let id = a.create_note(0).unwrap();
+        a.replace_text(&id, "v1", 0).unwrap();
+        let mut b = NoteStore::load(&a.save()).unwrap();
+        a.replace_text(&id, "v2", 2 * HISTORY_IDLE_MS).unwrap();
+
+        // A restores to v1 while B concurrently adds a tag.
+        let v1 = a
+            .note_history(&id)
+            .unwrap()
+            .last()
+            .unwrap()
+            .version_id
+            .clone();
+        a.restore(&id, &v1, 4 * HISTORY_IDLE_MS).unwrap();
+        b.add_tag(&id, "b", 2 * HISTORY_IDLE_MS).unwrap();
+        a.merge(&mut b).unwrap();
+
+        let n = a.get_note(&id).unwrap().unwrap();
+        assert_eq!(n.text, "v1", "the restore survived the merge");
+        assert!(
+            n.tags.contains(&"b".to_string()),
+            "B's concurrent tag survived"
+        );
+    }
+
+    #[test]
+    fn history_is_capped_at_100() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(0).unwrap();
+        for i in 1..=110i64 {
+            s.replace_text(&id, &format!("v{i}"), i * 2 * HISTORY_IDLE_MS)
+                .unwrap();
+        }
+        let h = s.note_history(&id).unwrap();
+        assert_eq!(h.len(), HISTORY_CAP);
+        assert_eq!(
+            s.note_at(&id, &h[0].version_id).unwrap().unwrap().text,
+            "v110"
+        );
+    }
+
+    #[test]
+    fn note_at_rejects_a_bad_version_id() {
+        let mut s = NoteStore::new();
+        let id = s.create_note(0).unwrap();
+        assert!(s.note_at(&id, "not-a-hash").is_err());
     }
 }
