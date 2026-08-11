@@ -16,7 +16,7 @@ use note_protocol::{
 };
 use note_relay::build_app;
 use note_relay::state::AppState;
-use note_relay::storage::{InMemoryStorage, Storage};
+use note_relay::storage::{InMemoryStorage, SqliteStorage, Storage};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use tokio::net::TcpStream;
@@ -607,4 +607,100 @@ async fn admin_rejects_wrong_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sync_survives_relay_restart_with_sqlite() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("pn-relay-e2e-{}.db", std::process::id()));
+    let p = path.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&p);
+
+    // Provision two devices on a SQLite-backed store.
+    let storage = Arc::new(SqliteStorage::open(&p).unwrap());
+    let (group, code1) = storage.create_group();
+    let sk1 = signing_key();
+    let (dev1, _) = storage
+        .enroll(&code1, sk1.verifying_key().to_bytes().to_vec())
+        .unwrap();
+    let code2 = storage.create_invite(&group).unwrap();
+    let sk2 = signing_key();
+    let (dev2, _) = storage
+        .enroll(&code2, sk2.verifying_key().to_bytes().to_vec())
+        .unwrap();
+
+    // First relay incarnation: device 1 pushes a change (durably stored).
+    let app = build_app(AppState::new(storage.clone(), None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let url = format!("ws://{addr}/v1/sync");
+    let mut ws1 = connect_auth(&url, &dev1, &sk1).await;
+    send(
+        &mut ws1,
+        ClientMsg::Push {
+            envelope: "DURABLE".to_string(),
+            client_change_id: "c1".to_string(),
+        },
+    )
+    .await;
+    match recv(&mut ws1).await {
+        ServerMsg::Ack { seq, .. } => assert_eq!(seq, 1),
+        other => panic!("expected ack, got {other:?}"),
+    }
+
+    // Restart: drop the socket, stop the server, drop the storage handle.
+    drop(ws1);
+    handle.abort();
+    drop(storage);
+
+    // Reopen the same DB file in a fresh relay incarnation.
+    let storage2 = Arc::new(SqliteStorage::open(&p).unwrap());
+    let app2 = build_app(AppState::new(storage2, None));
+    let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener2, app2).await.unwrap() });
+    let url2 = format!("ws://{addr2}/v1/sync");
+
+    // Device 2 pulls from the restarted relay and sees the persisted change.
+    let mut ws2 = connect_auth(&url2, &dev2, &sk2).await;
+    send(&mut ws2, ClientMsg::Pull { since_seq: 0 }).await;
+    match recv(&mut ws2).await {
+        ServerMsg::Change {
+            seq,
+            device_id,
+            envelope,
+        } => {
+            assert_eq!(seq, 1);
+            assert_eq!(device_id, dev1);
+            assert_eq!(envelope, "DURABLE");
+        }
+        other => panic!("expected change, got {other:?}"),
+    }
+
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{p}{suffix}"));
+    }
+}
+
+#[tokio::test]
+async fn revoking_a_device_ends_its_live_session() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let (_group, code) = storage.create_group();
+    let sk = signing_key();
+    let (dev, _) = storage
+        .enroll(&code, sk.verifying_key().to_bytes().to_vec())
+        .unwrap();
+    let addr = spawn_server(storage.clone(), None).await;
+    let url = format!("ws://{addr}/v1/sync");
+
+    let mut ws = connect_auth(&url, &dev, &sk).await;
+    // Revoke the device while its session is still open.
+    assert!(storage.revoke_device(&dev));
+    // The next operation on the live socket must be rejected.
+    send(&mut ws, ClientMsg::Pull { since_seq: 0 }).await;
+    match recv(&mut ws).await {
+        ServerMsg::Error { code, .. } => assert_eq!(code, "unauthorized"),
+        other => panic!("expected unauthorized after revoke, got {other:?}"),
+    }
 }

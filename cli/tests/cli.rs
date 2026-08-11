@@ -40,6 +40,47 @@ fn new_prints_short_id_then_lists_and_shows() {
 }
 
 #[test]
+fn history_lists_versions_and_restore_reverts() {
+    let dir = TempDir::new().unwrap();
+    let out = pn(&dir).args(["new", "--title", "V1"]).assert().success();
+    let id = String::from_utf8(out.get_output().stdout.clone())
+        .unwrap()
+        .trim()
+        .to_string();
+    // A second process is a distinct author, so a new version.
+    pn(&dir).args(["set-title", &id, "V2"]).assert().success();
+
+    let h = pn(&dir).args(["history", &id]).assert().success();
+    let lines = String::from_utf8(h.get_output().stdout.clone()).unwrap();
+    assert_eq!(lines.lines().count(), 2, "two versions: V1 then V2");
+
+    pn(&dir)
+        .arg("ls")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("V2"));
+
+    // Restore to the oldest version (index 2) reverts the title to V1.
+    pn(&dir).args(["restore", &id, "2"]).assert().success();
+    pn(&dir)
+        .arg("ls")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("V1"));
+}
+
+#[test]
+fn restore_rejects_an_out_of_range_version() {
+    let dir = TempDir::new().unwrap();
+    let out = pn(&dir).args(["new", "--title", "X"]).assert().success();
+    let id = String::from_utf8(out.get_output().stdout.clone())
+        .unwrap()
+        .trim()
+        .to_string();
+    pn(&dir).args(["restore", &id, "99"]).assert().failure();
+}
+
+#[test]
 fn alias_n_and_ls_are_equivalent() {
     let dir = TempDir::new().unwrap();
     pn(&dir)
