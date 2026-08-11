@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use note_relay::build_app;
 use note_relay::state::AppState;
-use note_relay::storage::InMemoryStorage;
+use note_relay::storage::{InMemoryStorage, SqliteStorage, Storage};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -23,14 +23,20 @@ async fn main() -> Result<()> {
         tracing::warn!("PN_RELAY_ADMIN_TOKEN unset — admin endpoints are disabled");
     }
 
-    let storage = Arc::new(InMemoryStorage::new());
+    let storage: Arc<dyn Storage> = match env::var("PN_RELAY_DB") {
+        Ok(path) => {
+            tracing::info!("using SQLite storage at {path}");
+            Arc::new(SqliteStorage::open(&path)?)
+        }
+        Err(_) => {
+            tracing::warn!("PN_RELAY_DB unset — using in-memory storage (data is lost on restart)");
+            Arc::new(InMemoryStorage::new())
+        }
+    };
     let state = AppState::new(storage, admin_token);
 
     let listener = TcpListener::bind(&bind).await?;
-    tracing::info!(
-        "note-relay {} listening on {bind}",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing::info!("note-relay {} listening on {bind}", env!("PN_VERSION"));
     axum::serve(listener, build_app(state)).await?;
     Ok(())
 }

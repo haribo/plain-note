@@ -7,11 +7,18 @@
 //! written and audited once.
 
 pub mod crypto;
+pub mod doc;
 pub mod model;
 pub mod sync;
 
-pub use crypto::{Aad, CryptoError, GroupKey, Kind, open, seal};
-pub use model::{ModelError, Note, NoteId, NoteMeta, NoteStore, Timestamp};
+pub use crypto::{
+    Aad, CryptoError, GroupKey, Kind, attachment_id, open, open_attachment, seal, seal_attachment,
+};
+pub use doc::{Block, Doc, Inline, Marks, TaskItem, doc_to_markdown, markdown_to_doc};
+pub use model::{
+    FolderId, FolderMeta, ModelError, Note, NoteId, NoteMeta, NoteStore, NoteVersion, ROOT_FOLDER,
+    Timestamp,
+};
 pub use sync::{SyncConfig, SyncError, sync_once};
 
 /// Crate version, surfaced to clients for diagnostics.

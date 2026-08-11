@@ -26,6 +26,8 @@ ed25519-dalek.workspace = true
 base64.workspace = true
 hex.workspace = true
 rand.workspace = true
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true

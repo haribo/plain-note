@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand blue (continuity with the GTK client / the Android redesign). -->
+    <color name="ic_launcher_background">#3A5CD6</color>
+</resources>

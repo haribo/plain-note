@@ -1,0 +1,24 @@
+# Plain Note continuous sync — a per-user service.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/systemd/plain-note-sync.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now plain-note-sync.service
+#
+# `pn` must be on PATH (e.g. `cargo install --path cli`). Adjust ExecStart if it
+# lives elsewhere.
+
+[Unit]
+Description=Plain Note continuous sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env pn sync --watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
