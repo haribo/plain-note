@@ -28,6 +28,9 @@ This file takes precedence over auto-memory. If an auto-memory entry contradicts
 - Code is never source of truth — code/design disagreement = code is the bug, or design needs an explicit amendment, never both silently
 - If design is silent on a needed behavior: write design first, then code
 - Group docs by single coherent concern — broad-keyword grab-bags (security, utils) are forbidden
+- ADR lifecycle: never delete an ADR; a reversal is a **new** ADR, and both sides carry the link — `Superseded by ADR-NNN` on the old, `Supersedes ADR-MMM` on the new. A one-sided link is how the chain rots
+- An ADR whose decision no longer applies, with no replacement, is marked `Deprecated` — never edited away or moved
+- In-place edits only for corrections of form and for clarifications that do not change the decision
 
 ## Design & ADRs (`docs/design/`, `docs/adr/`, `docs/<crate>/adr/`)
 

@@ -85,11 +85,17 @@ A new technical doc must pass the severe 4-point test (§ 4).
 
 ### 4. Lifecycle and ownership
 
-**ADR lifecycle** — editable. Edits go in place; the doc always shows the current
-decision. Git log captures history (no revision section inside the ADR). Status:
+**ADR lifecycle** — append-only. An accepted ADR is immutable: in-place edits only
+for corrections of form and for clarifications that do not change the decision.
+A reversal is a new ADR; the old one keeps its body, and both sides carry the
+link. An ADR is never deleted, nor moved to another directory. Status:
 - `Active` — current decision.
-- `Superseded by ADR-XYZ` — only for major reversals. For clarifications or scope
-  tweaks, edit in place.
+- `Superseded by ADR-XYZ` — replaced; the new record carries `Supersedes ADR-ABC`
+  back to this one. One-sided links rot: mark both.
+- `Deprecated` — no longer applies, and nothing replaced it.
+
+Applies from the merge of this change. Records written earlier were maintained
+under an editable policy and may have been amended in place.
 
 **Design lifecycle** — synchronous with code (per `CLAUDE.md`): a change
 introducing user-facing behavior updates `docs/design/` in the same diff.
