@@ -20,7 +20,7 @@ hex.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 fs2 = "0.4"
-notify = "6"
+notify = "8"
 
 [dev-dependencies]
 note-relay.workspace = true
