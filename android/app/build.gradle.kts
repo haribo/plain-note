@@ -100,6 +100,21 @@ tasks.named("preBuild").configure {
     dependsOn("cargoBuild")
 }
 
+// Build the mobile crate for the host (repo/target/debug) so JVM unit tests can
+// cross the real FFI: scenario captures render DocView / VisualEditor, whose
+// markdownToDoc / docToMarkdown calls load libplain_note_mobile.so through JNA.
+val cargoBuildHost by tasks.registering(Exec::class) {
+    workingDir = rootProject.projectDir.parentFile
+    commandLine("cargo", "build", "-p", "plain-note-mobile")
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(cargoBuildHost)
+    systemProperty(
+        "jna.library.path",
+        rootProject.projectDir.parentFile.resolve("target/debug").absolutePath,
+    )
+}
+
 dependencies {
     // Shared Compose BOM — used by main, unit-test (Roborazzi) and androidTest.
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
@@ -108,9 +123,10 @@ dependencies {
     // 5.15+ ships 16 KB-aligned native libs (Android 15 requirement, #79).
     implementation("net.java.dev.jna:jna:5.15.0@aar")
 
-    // JVM unit tests for the pure Kotlin editor transforms (no device, no native
-    // lib: the UniFFI bindings load libplain_note_mobile.so lazily on the first
-    // FFI call, and these tests only construct data classes + call transforms).
+    // JVM unit tests (no device). Tests that cross the FFI load the host build
+    // of libplain_note_mobile.so (see cargoBuildHost); the desktop JNA jar
+    // provides the JVM native dispatch the @aar variant lacks.
+    testImplementation("net.java.dev.jna:jna:5.15.0")
     testImplementation("junit:junit:4.13.2")
     // Deterministic coroutine testing for the ViewModel (virtual time + Main).
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
